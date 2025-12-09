@@ -4,11 +4,21 @@ import feedparser
 from typing import List, Dict, Optional
 from config.settings import settings
 from utils.logger import get_logger
+from ingestion.semantic_scholar_enhanced import search_papers_enhanced, paper_autocomplete
+from ingestion.crossref_api import search_crossref
+from ingestion.openalex_api import search_openalex
 
 logger = get_logger(__name__)
 
 
-def search_semantic_scholar(query: str, limit: int = 5) -> List[Dict]:
+def search_semantic_scholar(
+    query: str, 
+    limit: int = 5,
+    year: Optional[str] = None,
+    fields_of_study: Optional[List[str]] = None,
+    open_access_only: bool = False,
+    min_citation_count: Optional[int] = None
+) -> List[Dict]:
     """
     Search for papers on Semantic Scholar.
     
@@ -20,137 +30,145 @@ def search_semantic_scholar(query: str, limit: int = 5) -> List[Dict]:
         List of paper dictionaries with metadata and PDF URLs
     """
     try:
-        url = f"{settings.semantic_scholar_base_url}/paper/search"
-        params = {
-            "query": query,
-            "limit": limit,
-            "fields": "title,authors,abstract,year,openAccessPdf,paperId,url"
-        }
+        # Use enhanced search with filters
+        search_result = search_papers_enhanced(
+            query=query,
+            limit=limit,
+            year=year,
+            fields_of_study=fields_of_study,
+            open_access_only=open_access_only,
+            min_citation_count=min_citation_count
+        )
         
-        logger.info(f"Searching Semantic Scholar for: {query}")
-        response = requests.get(url, params=params, timeout=15)
-        response.raise_for_status()
+        results = search_result.get("data", [])
         
-        data = response.json()
-        papers = data.get("data", [])
+        # Filter to only papers with PDFs if open_access_only is False
+        if not open_access_only:
+            results = [p for p in results if p.get("pdf_url")]
         
-        results = []
-        for paper in papers:
-            authors = [author.get("name", "") for author in paper.get("authors", []) if author.get("name")]
-            pdf_url = None
-            if paper.get("openAccessPdf"):
-                pdf_url = paper["openAccessPdf"].get("url")
-            
-            if pdf_url:  # Only include papers with PDFs
-                results.append({
-                    "paper_id": paper.get("paperId"),
-                    "title": paper.get("title", "Untitled Paper"),
-                    "authors": authors,
-                    "authors_string": ", ".join(authors) if authors else "Unknown Authors",
-                    "abstract": paper.get("abstract"),
-                    "year": paper.get("year"),
-                    "pdf_url": pdf_url,
-                    "url": paper.get("url"),
-                    "source": "semantic_scholar"
-                })
-        
-        logger.info(f"Found {len(results)} papers with PDFs from Semantic Scholar")
+        logger.info(f"Found {len(results)} papers from Semantic Scholar (total available: {search_result.get('total', 0)})")
         return results
         
+    except requests.exceptions.Timeout:
+        logger.warning("Semantic Scholar request timed out. Using ArXiv as fallback.")
+        return []
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"Semantic Scholar request failed: {e}. Using ArXiv as fallback.")
+        return []
     except Exception as e:
-        logger.error(f"Error searching Semantic Scholar: {e}")
+        logger.error(f"Unexpected error searching Semantic Scholar: {e}")
         return []
 
 
-def search_arxiv(query: str, max_results: int = 5) -> List[Dict]:
+def search_arxiv(
+    query: str, 
+    max_results: int = 5,
+    field: Optional[str] = None,
+    sort_by: str = "relevance",
+    sort_order: str = "descending"
+) -> List[Dict]:
     """
-    Search for papers on ArXiv.
+    Search for papers on ArXiv with enhanced capabilities.
     
     Args:
-        query: Search query/topic
+        query: Search query/topic (supports field prefixes: ti:, au:, abs:, etc.)
         max_results: Maximum number of results
+        field: Field to search (ti, au, abs, co, jr, cat, rn, all)
+        sort_by: Sort by "relevance", "lastUpdatedDate", or "submittedDate"
+        sort_order: "ascending" or "descending"
         
     Returns:
         List of paper dictionaries with metadata and PDF URLs
     """
     try:
-        params = {
-            "search_query": f"all:{query}",
-            "start": 0,
-            "max_results": max_results,
-            "sortBy": "relevance",
-            "sortOrder": "descending"
-        }
+        from ingestion.arxiv_enhanced import search_arxiv_enhanced
         
-        logger.info(f"Searching ArXiv for: {query}")
-        response = requests.get(settings.arxiv_base_url, params=params, timeout=15)
-        response.raise_for_status()
+        result = search_arxiv_enhanced(
+            query=query,
+            max_results=max_results,
+            field=field,
+            sort_by=sort_by,
+            sort_order=sort_order
+        )
         
-        feed = feedparser.parse(response.content)
-        
-        results = []
-        for entry in feed.entries:
-            # ArXiv always has PDFs
-            pdf_url = None
-            for link in entry.links:
-                if link.rel == "alternate" and link.type == "application/pdf":
-                    pdf_url = link.href
-                    break
-            
-            if not pdf_url:
-                # Fallback: construct PDF URL from ArXiv ID
-                arxiv_id = entry.id.split("/")[-1]
-                pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-            
-            # Extract authors
-            authors = [author.name for author in entry.get("authors", [])]
-            
-            results.append({
-                "paper_id": entry.id.split("/")[-1],  # ArXiv ID
-                "title": entry.title,
-                "authors": authors,
-                "authors_string": ", ".join(authors) if authors else "Unknown Authors",
-                "abstract": entry.get("summary", ""),
-                "year": entry.published_parsed.tm_year if entry.published_parsed else None,
-                "pdf_url": pdf_url,
-                "url": entry.link,
-                "source": "arxiv"
-            })
-        
-        logger.info(f"Found {len(results)} papers from ArXiv")
-        return results
+        return result.get("entries", [])
         
     except Exception as e:
         logger.error(f"Error searching ArXiv: {e}")
         return []
 
 
-def fetch_papers_by_topic(topic: str, max_papers: int = None) -> List[Dict]:
+def fetch_papers_by_topic(
+    topic: str, 
+    max_papers: int = None,
+    sources: Optional[List[str]] = None
+) -> List[Dict]:
     """
     Fetch papers from multiple sources based on a topic.
     
     Args:
         topic: Topic or query string
         max_papers: Maximum total papers to fetch
+        sources: List of sources to use (default: all available)
         
     Returns:
         List of paper dictionaries with PDF URLs
     """
     max_papers = max_papers or settings.max_papers_per_query
+    sources = sources or ["arxiv", "semantic_scholar", "crossref", "openalex"]
     
-    logger.info(f"Fetching papers for topic: {topic}")
+    logger.info(f"Fetching papers for topic: {topic} from {sources}")
     
     all_papers = []
+    papers_per_source = max_papers // len(sources) + 1
     
-    # Try Semantic Scholar first (usually has better metadata)
-    semantic_papers = search_semantic_scholar(topic, limit=max_papers)
-    all_papers.extend(semantic_papers)
+    # Try Semantic Scholar
+    if "semantic_scholar" in sources:
+        try:
+            semantic_papers = search_semantic_scholar(topic, limit=papers_per_source)
+            if semantic_papers:
+                all_papers.extend(semantic_papers)
+                logger.info(f"Got {len(semantic_papers)} papers from Semantic Scholar")
+        except Exception as e:
+            logger.warning(f"Semantic Scholar search failed: {e}")
     
-    # If we need more, try ArXiv
-    if len(all_papers) < max_papers:
+    # Try ArXiv
+    if "arxiv" in sources:
         remaining = max_papers - len(all_papers)
-        arxiv_papers = search_arxiv(topic, max_results=remaining)
-        all_papers.extend(arxiv_papers)
+        if remaining > 0:
+            try:
+                arxiv_papers = search_arxiv(topic, max_results=min(remaining, papers_per_source))
+                if arxiv_papers:
+                    all_papers.extend(arxiv_papers)
+                    logger.info(f"Got {len(arxiv_papers)} papers from ArXiv")
+            except Exception as e:
+                logger.warning(f"ArXiv search failed: {e}")
+    
+    # Try Crossref
+    if "crossref" in sources:
+        remaining = max_papers - len(all_papers)
+        if remaining > 0:
+            try:
+                crossref_result = search_crossref(query=topic, rows=min(remaining, papers_per_source))
+                crossref_papers = crossref_result.get("items", [])
+                if crossref_papers:
+                    all_papers.extend(crossref_papers)
+                    logger.info(f"Got {len(crossref_papers)} papers from Crossref")
+            except Exception as e:
+                logger.warning(f"Crossref search failed: {e}")
+    
+    # Try OpenAlex
+    if "openalex" in sources:
+        remaining = max_papers - len(all_papers)
+        if remaining > 0:
+            try:
+                openalex_result = search_openalex(query=topic, per_page=min(remaining, papers_per_source))
+                openalex_papers = openalex_result.get("items", [])
+                if openalex_papers:
+                    all_papers.extend(openalex_papers)
+                    logger.info(f"Got {len(openalex_papers)} papers from OpenAlex")
+            except Exception as e:
+                logger.warning(f"OpenAlex search failed: {e}")
     
     # Remove duplicates (by title similarity)
     unique_papers = []

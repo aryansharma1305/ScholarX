@@ -10,7 +10,7 @@ A production-ready Python RAG pipeline for semantic search and question answerin
 pip install -r requirements.txt
 
 # Run Streamlit app
-streamlit run app.py
+streamlit run streamlit_app.py
 # Or use the script:
 ./run_app.sh
 
@@ -40,9 +40,8 @@ python-rag/
 ├── query_interactive.py       # Query interface (with modes)
 ├── manage_papers.py           # Collection management
 ├── view_results.py            # View saved queries
-├── scale_example.py           # Large-scale ingestion
-├── feature_showcase.py        # Demo all features
-├── advanced_features.py       # Advanced features demo
+├── streamlit_app.py           # Main Streamlit application
+├── run_app.sh                 # Quick start script
 ├── api/                       # Feature APIs
 │   ├── main_api.py           # Unified API interface
 │   ├── paper_api.py          # Paper details & summaries
@@ -114,6 +113,12 @@ python-rag/
 - ✅ **Deduplication**: Detect and merge duplicate papers
 - ✅ **Similarity Checking**: Compare papers or check text similarity
 - ✅ **ArXiv Version Normalization**: Handle paper versions
+
+### Enhanced API Features
+- ✅ **Full ArXiv API**: Field searches (ti:, au:, abs:, cat:), Boolean operators, date filters
+- ✅ **Full Semantic Scholar API**: Autocomplete, batch lookup, enhanced search, snippet search
+- ✅ **Author Search**: With h-index, citations, affiliations
+- ✅ **Advanced Filters**: Year ranges, categories, citation counts, open access
 
 ## 📖 Usage
 
@@ -193,6 +198,20 @@ MAX_PAPERS_PER_QUERY=5
 - Python 3.10+
 - See `requirements.txt` for dependencies
 - No API keys needed for free mode!
+
+## 📡 APIs Used
+
+### ArXiv API (Free, No Key)
+- **Base URL**: `http://export.arxiv.org/api/query`
+- **Features**: Field searches, Boolean operators, date filtering, sorting
+- **Rate Limits**: None (be respectful, 3s delay recommended)
+- **Max Results**: 2000 per call, 30000 total
+
+### Semantic Scholar API (Free, No Key)
+- **Base URL**: `https://api.semanticscholar.org/graph/v1`
+- **Features**: Autocomplete, batch lookup, enhanced search, citations/references
+- **Rate Limits**: 100 requests per 5 minutes
+- **Fallback**: Automatically uses ArXiv if rate-limited
 
 ## 📝 License
 
