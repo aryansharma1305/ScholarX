@@ -4,22 +4,31 @@ A production-ready Python RAG pipeline for semantic search and question answerin
 
 ## 🚀 Quick Start
 
+### Option 1: Streamlit Web App (Recommended)
 ```bash
 # Install dependencies
 pip install -r requirements.txt
 
-# Set up .env (see .env.example)
-cp .env.example .env
-# Edit .env with your settings
+# Run Streamlit app
+streamlit run app.py
+# Or use the script:
+./run_app.sh
 
-# Add papers
-python3 add_papers.py
+# App opens at http://localhost:8501
+```
+
+### Option 2: Command Line
+```bash
+# Install dependencies
+pip install -r requirements.txt
 
 # Query interactively
 python3 query_interactive.py
 
-# Manage collection
-python3 manage_papers.py
+# Or use Python API
+python3
+>>> from main import query_rag
+>>> result = query_rag("What is transformer architecture?")
 ```
 
 ## 📁 Project Structure
