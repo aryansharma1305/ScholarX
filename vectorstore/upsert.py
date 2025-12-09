@@ -55,8 +55,18 @@ def upsert_chunks(
         metadatas.append(chunk_metadata)
     
     try:
-        # ChromaDB can handle embeddings directly or compute them
-        # We'll add embeddings as embeddings parameter
+        # ChromaDB doesn't have a native upsert, so we delete existing chunks first
+        # to make reprocessing idempotent (delete-then-add pattern)
+        if ids:
+            try:
+                # Delete existing chunks with these IDs to avoid duplicates
+                collection.delete(ids=ids)
+                logger.debug(f"Deleted {len(ids)} existing chunks before upsert")
+            except Exception as delete_error:
+                # If deletion fails (e.g., chunks don't exist), that's okay
+                logger.debug(f"No existing chunks to delete: {delete_error}")
+        
+        # Now add the chunks (this is idempotent after deletion)
         collection.add(
             ids=ids,
             embeddings=embeddings,

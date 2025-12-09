@@ -131,19 +131,82 @@ def get_library_papers():
         return []
 
 
-def display_paper_card(paper: Dict, show_add_button: bool = True):
-    """Display a paper card with all metadata."""
+def display_paper_card_with_ranking(paper: Dict, query: str = "", rank: int = 0, show_add_button: bool = True):
+    """Display a paper card with relevance ranking."""
     source = paper.get("source", "unknown")
     badge_class = "badge-arxiv" if source == "arxiv" else "badge-semantic"
     
+    # Get relevance info
+    relevance_score = paper.get("relevance_score", 0.0)
+    relevance_percent = paper.get("relevance_percent", "N/A")
+    relevance_info = get_relevance_category(relevance_score) if relevance_score > 0 and query else None
+    
+    # Build relevance badge HTML
+    relevance_html = ""
+    if relevance_info and query:
+        relevance_html = f"""
+        <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; padding: 0.5rem; background: linear-gradient(90deg, {relevance_info['color']}20, transparent); border-left: 4px solid {relevance_info['color']}; border-radius: 4px;">
+            <span style="font-size: 1.5rem;">{relevance_info['emoji']}</span>
+            <div>
+                <div style="font-weight: bold; color: {relevance_info['color']}; font-size: 1.1rem;">
+                    #{rank} - {relevance_percent} Match
+                </div>
+                <div style="font-size: 0.9rem; color: #666;">
+                    {relevance_info['category']}
+                </div>
+            </div>
+        </div>
+        """
+    
     st.markdown(f"""
     <div class="paper-card">
+        {relevance_html}
         <h3>{paper.get('title', 'Unknown')}</h3>
-        <p><strong>Authors:</strong> {paper.get('authors', 'Unknown')}</p>
+        <p><strong>Authors:</strong> {paper.get('authors_string', paper.get('authors', 'Unknown'))}</p>
         <p><strong>Year:</strong> {paper.get('year', 'N/A')}</p>
         <span class="badge {badge_class}">{source.upper()}</span>
     </div>
     """, unsafe_allow_html=True)
+    
+    # Show relevance progress bar
+    if relevance_info and query:
+        st.progress(relevance_score, text=f"Relevance Score: {relevance_percent}")
+        
+        # Show breakdown
+        if paper.get("relevance_breakdown"):
+            with st.expander("📊 Relevance Breakdown", expanded=False):
+                breakdown = paper["relevance_breakdown"]
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Semantic", f"{breakdown.get('semantic', 0) * 100:.1f}%")
+                with col2:
+                    st.metric("Keyword", f"{breakdown.get('keyword', 0) * 100:.1f}%")
+                with col3:
+                    st.metric("Title Match", f"{breakdown.get('title_match', 0) * 100:.1f}%")
+    
+    if paper.get("abstract"):
+        with st.expander("📄 Abstract"):
+            st.write(paper["abstract"])
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if paper.get("pdf_url"):
+            st.link_button("📥 Download PDF", paper["pdf_url"])
+    with col2:
+        if show_add_button:
+            if st.button("➕ Add to Library", key=f"add_{paper.get('paper_id')}"):
+                process_paper_for_rag(paper)
+    with col3:
+        if st.button("📊 View Details", key=f"view_{paper.get('paper_id')}"):
+            st.session_state[f"view_paper_{paper.get('paper_id')}"] = paper
+            st.rerun()
+    
+    st.divider()
+
+
+def display_paper_card(paper: Dict, show_add_button: bool = True):
+    """Display a paper card with all metadata."""
+    display_paper_card_with_ranking(paper, query="", rank=0, show_add_button=show_add_button)
     
     if paper.get("abstract"):
         with st.expander("📄 Abstract"):
@@ -512,10 +575,35 @@ with tab2:
                                 seen_titles.add(title_lower)
                                 unique_papers.append(paper)
                         
+                        # Rank papers by relevance to query
+                        if query and unique_papers:
+                            unique_papers = rank_papers_by_relevance(
+                                query=query,
+                                papers=unique_papers,
+                                use_semantic=True,
+                                use_keyword=True
+                            )
+                        
                         if unique_papers:
-                            st.success(f"Found {len(unique_papers)} unique papers!")
-                            for paper in unique_papers:
-                                display_paper_card(paper)
+                            st.success(f"Found {len(unique_papers)} unique papers! (Ranked by relevance)")
+                            
+                            # Show sorting option
+                            col1, col2 = st.columns([3, 1])
+                            with col2:
+                                sort_by = st.selectbox("Sort by", ["Relevance (Best Match)", "Year (newest)", "Year (oldest)", "Citations"], key="sort_results")
+                            
+                            # Sort papers
+                            if sort_by == "Year (newest)":
+                                unique_papers.sort(key=lambda x: x.get("year") or 0, reverse=True)
+                            elif sort_by == "Year (oldest)":
+                                unique_papers.sort(key=lambda x: x.get("year") or 0)
+                            elif sort_by == "Citations":
+                                unique_papers.sort(key=lambda x: x.get("citation_count", 0), reverse=True)
+                            # Default: Relevance (already sorted)
+                            
+                            for i, paper in enumerate(unique_papers, 1):
+                                # Display with relevance score
+                                display_paper_card_with_ranking(paper, query=query, rank=i)
                         else:
                             st.warning("No papers found. Try different keywords.")
                     except Exception as e:

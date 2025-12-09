@@ -4,6 +4,7 @@ from vectorstore.query import QueryResult, query_vectors
 from config.chroma_client import get_collection
 from processing.embeddings import generate_embedding
 from rag.search_enhanced import search_by_author, search_by_year
+from api.relevance_ranking import rank_papers_by_relevance
 from utils.logger import get_logger
 
 logger = get_logger(__name__)

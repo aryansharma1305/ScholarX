@@ -10,7 +10,7 @@ logger = get_logger(__name__)
 
 def simple_keyword_match(query: str, text: str) -> float:
     """
-    Simple keyword matching score (BM25-like).
+    Improved keyword matching score with normalization.
     
     Args:
         query: Query string
@@ -19,17 +19,37 @@ def simple_keyword_match(query: str, text: str) -> float:
     Returns:
         Keyword match score (0-1)
     """
-    query_words = set(query.lower().split())
-    text_words = set(text.lower().split())
+    if not query or not text:
+        return 0.0
+    
+    # Normalize: lowercase, remove punctuation, split on whitespace
+    import re
+    query_normalized = re.sub(r'[^\w\s]', ' ', query.lower())
+    text_normalized = re.sub(r'[^\w\s]', ' ', text.lower())
+    
+    query_words = set(word for word in query_normalized.split() if len(word) > 2)  # Ignore very short words
+    text_words = set(word for word in text_normalized.split() if len(word) > 2)
     
     if not query_words:
         return 0.0
     
-    # Calculate overlap
-    overlap = len(query_words.intersection(text_words))
-    score = overlap / len(query_words)
+    # Calculate overlap (Jaccard similarity)
+    intersection = query_words.intersection(text_words)
+    union = query_words.union(text_words)
     
-    return score
+    if not union:
+        return 0.0
+    
+    # Jaccard similarity: intersection / union
+    jaccard_score = len(intersection) / len(union)
+    
+    # Also consider how many query terms matched (precision)
+    precision_score = len(intersection) / len(query_words)
+    
+    # Combined score (weighted average)
+    score = (0.6 * jaccard_score) + (0.4 * precision_score)
+    
+    return min(1.0, score)
 
 
 def hybrid_search(
@@ -50,10 +70,17 @@ def hybrid_search(
     Returns:
         List of QueryResult objects sorted by combined score
     """
-    # Normalize weights
+    # Normalize weights (guard against zero division)
     total_weight = semantic_weight + keyword_weight
-    semantic_weight = semantic_weight / total_weight
-    keyword_weight = keyword_weight / total_weight
+    if total_weight == 0:
+        # Default to semantic-only if both weights are zero
+        logger.warning("Both weights are zero, defaulting to semantic-only search")
+        semantic_weight = 1.0
+        keyword_weight = 0.0
+        total_weight = 1.0
+    else:
+        semantic_weight = semantic_weight / total_weight
+        keyword_weight = keyword_weight / total_weight
     
     logger.info(f"Performing hybrid search: semantic={semantic_weight:.2f}, keyword={keyword_weight:.2f}")
     
@@ -74,6 +101,8 @@ def hybrid_search(
         combined_score = (semantic_weight * result.score) + (keyword_weight * keyword_score)
         
         # Create new result with combined score
+        # Safe metadata spreading: handle None metadata
+        base_metadata = result.metadata if result.metadata is not None else {}
         hybrid_result = QueryResult(
             chunk_id=result.chunk_id,
             paper_id=result.paper_id,
@@ -81,7 +110,7 @@ def hybrid_search(
             text=result.text,
             score=combined_score,
             metadata={
-                **result.metadata,
+                **base_metadata,
                 "semantic_score": result.score,
                 "keyword_score": keyword_score,
                 "combined_score": combined_score

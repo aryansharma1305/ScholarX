@@ -1,5 +1,6 @@
 """Paper quality scoring for better ranking."""
 from typing import Dict, Optional
+from datetime import datetime
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -28,7 +29,7 @@ def calculate_quality_score(paper_metadata: Dict) -> float:
     # Recency (newer papers get higher score)
     year = paper_metadata.get("year")
     if year:
-        current_year = 2024
+        current_year = datetime.utcnow().year
         age = current_year - year
         if age <= 1:
             recency_score = 1.0
