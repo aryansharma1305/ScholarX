@@ -37,8 +37,8 @@ python3
 python-rag/
 ├── main.py                    # Core functions
 ├── add_papers.py              # Add papers (interactive)
-├── query_interactive.py       # Query interface (with modes)
-├── manage_papers.py           # Collection management
+├── query_interactive.py        # Query interface (with modes)
+├── manage_papers.py            # Collection management
 ├── view_results.py            # View saved queries
 ├── streamlit_app.py           # Main Streamlit application
 ├── run_app.sh                 # Quick start script
@@ -53,7 +53,14 @@ python-rag/
 │   ├── deduplication.py       # Duplicate detection
 │   ├── similarity.py         # Similarity checking
 │   ├── ranking.py            # Citation rankings
-│   └── query_logger.py       # Query analytics
+│   ├── query_logger.py       # Query analytics
+│   ├── recommendations.py    # Paper recommendations
+│   ├── trends.py             # Research trend analysis
+│   ├── research_gaps.py      # Research gap identification
+│   ├── query_intent.py       # Query intent classification
+│   ├── exports.py            # Export capabilities
+│   ├── relevance_ranking.py  # Relevance ranking
+│   └── search.py             # Search interface
 ├── config/                    # Configuration
 │   ├── settings.py
 │   ├── chroma_client.py
@@ -63,6 +70,10 @@ python-rag/
 │   ├── paper_fetcher.py
 │   ├── ingest_pipeline.py
 │   ├── enhanced_metadata.py
+│   ├── arxiv_enhanced.py
+│   ├── semantic_scholar_enhanced.py
+│   ├── crossref_api.py
+│   ├── openalex_api.py
 │   └── text_cleaner.py
 ├── processing/                # Text processing
 │   ├── chunker.py
@@ -80,45 +91,57 @@ python-rag/
 │   ├── quality_scorer.py
 │   ├── query_expander.py
 │   └── search_enhanced.py
+├── evaluation/                # Evaluation framework
+│   ├── metrics.py            # Evaluation metrics
+│   ├── baselines.py          # Baseline systems
+│   ├── datasets.py           # Dataset loading
+│   ├── statistical_analysis.py # Statistical tests
+│   ├── run_evaluation.py     # Evaluation runner
+│   └── ablation_study.py     # Ablation study
 └── utils/                     # Utilities
     ├── logger.py
-    └── timers.py
+    ├── timers.py
+    └── cache.py
 ```
 
 ## ✨ Features
 
-### Core Features (MVP)
+### Core Features
 - ✅ **PDF Ingestion**: Load papers from URLs or Semantic Scholar/ArXiv
 - ✅ **Semantic Search**: Vector-based similarity search
 - ✅ **Metadata Storage**: Title, authors, abstract, year, DOI, etc.
 - ✅ **RAG QA**: Question answering with citations
 
-### Good Project Features
+### Advanced Features
 - ✅ **Hybrid Search**: Combines semantic + keyword search
 - ✅ **Paper API**: Get paper details, summaries, chunks
 - ✅ **Citation Graph**: Find related and citing papers
-- ✅ **Chunk Provenance**: Track which chunk came from which paper
-- ✅ **Query Logging**: Analytics on queries and usage
-
-### Standout Features
 - ✅ **Auto Summaries**: Generate short, medium, and bullet-point summaries
 - ✅ **Author Graph**: Author statistics, co-author networks, profiles
 - ✅ **Topic Clustering**: Organize papers by topics using K-Means
 - ✅ **Advanced RAG Modes**: Concise, detailed, explain, compare, literature survey
 - ✅ **Multi-Document Synthesis**: Query across multiple specific papers
-
-### Optional Features
 - ✅ **Citation Ranking**: Rank papers by citation metrics
 - ✅ **Related Papers**: Find similar papers automatically
 - ✅ **Deduplication**: Detect and merge duplicate papers
 - ✅ **Similarity Checking**: Compare papers or check text similarity
-- ✅ **ArXiv Version Normalization**: Handle paper versions
 
 ### Enhanced API Features
-- ✅ **Full ArXiv API**: Field searches (ti:, au:, abs:, cat:), Boolean operators, date filters
-- ✅ **Full Semantic Scholar API**: Autocomplete, batch lookup, enhanced search, snippet search
+- ✅ **Full ArXiv API**: Field searches, Boolean operators, date filters
+- ✅ **Full Semantic Scholar API**: Autocomplete, batch lookup, enhanced search
+- ✅ **Crossref API**: Metadata retrieval, DOI resolution
+- ✅ **OpenAlex API**: Comprehensive paper metadata
 - ✅ **Author Search**: With h-index, citations, affiliations
 - ✅ **Advanced Filters**: Year ranges, categories, citation counts, open access
+
+### Unique Features
+- ✅ **Paper Recommendations**: Based on queries and reading history
+- ✅ **Research Trend Analysis**: Topic popularity over time, future predictions
+- ✅ **Research Gap Identification**: Find underexplored areas
+- ✅ **Query Intent Classification**: Automatic intent detection and routing
+- ✅ **Export Capabilities**: BibTeX, CSV, JSON, Markdown formats
+- ✅ **Performance Caching**: Intelligent caching layer
+- ✅ **Relevance Ranking**: Multi-factor ranking with visual indicators
 
 ## 📖 Usage
 
@@ -140,18 +163,6 @@ python3 query_interactive.py
 ```bash
 python3 manage_papers.py
 # List, delete, export, view stats
-```
-
-### Batch Add Many Papers
-```bash
-python3 scale_example.py
-# Pre-configured batch ingestion
-```
-
-### Advanced Features Demo
-```bash
-python3 feature_showcase.py
-# See all features in action
 ```
 
 ### Use API Programmatically
@@ -176,35 +187,28 @@ profile = api.get_author("John Doe")
 # Topic clustering
 clusters = api.cluster_topics(num_clusters=5)
 
-# Find duplicates
-duplicates = api.find_duplicates()
-
-# Check similarity
-similar = api.check_similarity("some text", threshold=0.8)
-
-# NEW: Recommendations
+# Recommendations
 recommendations = api.recommend_papers(limit=10)
 recommendations_for_query = api.recommend_for_query("transformer architecture", limit=5)
 
-# NEW: Trend Analysis
+# Trend Analysis
 trends = api.analyze_trends(years=[2020, 2021, 2022, 2023, 2024])
 field_trend = api.get_field_trends("transformer")
 future = api.predict_trends("transformer", years_ahead=3)
 
-# NEW: Research Gaps
+# Research Gaps
 gaps = api.find_gaps("neural machine translation", min_papers=5)
 combination_gap = api.find_combination_gaps("transformer", "computer vision")
 directions = api.suggest_directions("attention mechanisms")
 
-# NEW: Query Intent
+# Query Intent
 intent = api.classify_intent("Compare transformer and RNN architectures")
 routing = api.route_query("What are the latest trends in NLP?")
 
-# NEW: Exports
+# Exports
 api.export_bibtex(filename="my_papers.bib")
 api.export_csv(filename="papers.csv")
 api.export_markdown(filename="library.md")
-api.export_rag("What is attention?", answer, citations, "session.md")
 ```
 
 ## ⚙️ Configuration
@@ -215,6 +219,7 @@ EMBEDDING_PROVIDER=sentence-transformers  # Free, local
 LLM_PROVIDER=simple                        # Template-based
 CHUNK_SIZE=1000
 MAX_PAPERS_PER_QUERY=5
+SEMANTIC_SCHOLAR_API_KEY=your_key_here     # Optional
 ```
 
 ## 🔧 Requirements
@@ -229,13 +234,19 @@ MAX_PAPERS_PER_QUERY=5
 - **Base URL**: `http://export.arxiv.org/api/query`
 - **Features**: Field searches, Boolean operators, date filtering, sorting
 - **Rate Limits**: None (be respectful, 3s delay recommended)
-- **Max Results**: 2000 per call, 30000 total
 
-### Semantic Scholar API (Free, No Key)
+### Semantic Scholar API (Free, Optional Key)
 - **Base URL**: `https://api.semanticscholar.org/graph/v1`
 - **Features**: Autocomplete, batch lookup, enhanced search, citations/references
-- **Rate Limits**: 100 requests per 5 minutes
-- **Fallback**: Automatically uses ArXiv if rate-limited
+- **Rate Limits**: 100 requests per 5 minutes (free), higher with API key
+
+### Crossref API (Free, No Key)
+- **Base URL**: `https://api.crossref.org`
+- **Features**: Metadata retrieval, DOI resolution
+
+### OpenAlex API (Free, No Key)
+- **Base URL**: `https://api.openalex.org`
+- **Features**: Comprehensive paper metadata
 
 ## 📝 License
 
