@@ -8,5 +8,7 @@ echo "Press Ctrl+C to stop the server"
 echo ""
 
 cd "$(dirname "$0")"
-streamlit run app.py
+streamlit run streamlit_app.py
+
+
 

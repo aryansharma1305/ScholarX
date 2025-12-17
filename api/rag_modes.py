@@ -183,3 +183,5 @@ def rag_query_multi_document(papers: List[str], query: str, top_k: int = 5) -> D
         "papers_used": list(set(c["paper_id"] for c in response.citations))
     }
 
+
+

@@ -181,6 +181,30 @@ duplicates = api.find_duplicates()
 
 # Check similarity
 similar = api.check_similarity("some text", threshold=0.8)
+
+# NEW: Recommendations
+recommendations = api.recommend_papers(limit=10)
+recommendations_for_query = api.recommend_for_query("transformer architecture", limit=5)
+
+# NEW: Trend Analysis
+trends = api.analyze_trends(years=[2020, 2021, 2022, 2023, 2024])
+field_trend = api.get_field_trends("transformer")
+future = api.predict_trends("transformer", years_ahead=3)
+
+# NEW: Research Gaps
+gaps = api.find_gaps("neural machine translation", min_papers=5)
+combination_gap = api.find_combination_gaps("transformer", "computer vision")
+directions = api.suggest_directions("attention mechanisms")
+
+# NEW: Query Intent
+intent = api.classify_intent("Compare transformer and RNN architectures")
+routing = api.route_query("What are the latest trends in NLP?")
+
+# NEW: Exports
+api.export_bibtex(filename="my_papers.bib")
+api.export_csv(filename="papers.csv")
+api.export_markdown(filename="library.md")
+api.export_rag("What is attention?", answer, citations, "session.md")
 ```
 
 ## ⚙️ Configuration

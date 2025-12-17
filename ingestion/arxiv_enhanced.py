@@ -256,3 +256,5 @@ def search_arxiv_with_boolean(
     result = search_arxiv_enhanced(query=query, max_results=max_results)
     return result.get("entries", [])
 
+
+

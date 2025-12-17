@@ -241,3 +241,5 @@ def get_relevance_category(score: float) -> Dict[str, str]:
             "badge": "danger"
         }
 
+
+

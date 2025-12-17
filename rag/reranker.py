@@ -102,3 +102,5 @@ def ensure_diversity(results: List[QueryResult], max_per_paper: int = 2) -> List
     logger.info(f"Diversified results: {len(diversified)} from {len(results)} original")
     return diversified
 
+
+

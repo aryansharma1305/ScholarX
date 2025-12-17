@@ -59,3 +59,5 @@ def format_context_for_prompt(results: List[QueryResult]) -> str:
     
     return "\n---\n\n".join(context_parts)
 
+
+

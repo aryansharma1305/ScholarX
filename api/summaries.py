@@ -92,3 +92,5 @@ Format as JSON with keys: short, medium, bullets (array)."""
         "bullets": bullets[:7]
     }
 
+
+

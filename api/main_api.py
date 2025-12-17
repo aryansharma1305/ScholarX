@@ -14,6 +14,18 @@ from api.similarity import compare_papers, check_text_similarity
 from api.query_logger import get_query_stats
 from api.ranking import calculate_citation_metrics, get_paper_rank
 from api.search import search_papers, compare_papers_side_by_side, get_paper_details_scholar_style
+from api.recommendations import (
+    recommend_papers_based_on_history, recommend_papers_for_query,
+    record_paper_view, record_query, get_trending_topics
+)
+from api.trends import analyze_topic_trends, get_field_popularity, predict_future_trends
+from api.research_gaps import (
+    identify_research_gaps, find_underexplored_combinations, suggest_research_directions
+)
+from api.exports import (
+    export_to_bibtex, export_to_csv, export_to_json, export_to_markdown, export_rag_session
+)
+from api.query_intent import classify_query_intent, route_query_by_intent
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -162,6 +174,101 @@ class ScholarXAPI:
     def get_paper_scholar_style(paper_id: str) -> Dict:
         """Get paper details in Google Scholar format."""
         return get_paper_details_scholar_style(paper_id)
+    
+    # Recommendations (NEW)
+    @staticmethod
+    def recommend_papers(limit: int = 10) -> List[Dict]:
+        """Recommend papers based on user history."""
+        return recommend_papers_based_on_history(limit)
+    
+    @staticmethod
+    def recommend_for_query(query: str, limit: int = 10) -> List[Dict]:
+        """Recommend papers for a specific query."""
+        return recommend_papers_for_query(query, limit)
+    
+    @staticmethod
+    def record_view(paper_id: str, paper_title: str = ""):
+        """Record that a user viewed a paper."""
+        record_paper_view(paper_id, paper_title)
+    
+    @staticmethod
+    def record_user_query(query: str):
+        """Record a user query for recommendations."""
+        record_query(query)
+    
+    @staticmethod
+    def get_trending_topics_api(days: int = 30) -> List[Dict]:
+        """Get trending topics."""
+        return get_trending_topics(days)
+    
+    # Trends (NEW)
+    @staticmethod
+    def analyze_trends(years: Optional[List[int]] = None) -> Dict:
+        """Analyze topic trends over time."""
+        return analyze_topic_trends(years)
+    
+    @staticmethod
+    def get_field_trends(field: str) -> Dict:
+        """Get popularity trend for a field."""
+        return get_field_popularity(field)
+    
+    @staticmethod
+    def predict_trends(field: str, years_ahead: int = 3) -> Dict:
+        """Predict future trends for a field."""
+        return predict_future_trends(field, years_ahead)
+    
+    # Research Gaps (NEW)
+    @staticmethod
+    def find_gaps(topic: str, min_papers: int = 5) -> Dict:
+        """Identify research gaps in a topic."""
+        return identify_research_gaps(topic, min_papers)
+    
+    @staticmethod
+    def find_combination_gaps(concept1: str, concept2: str) -> Dict:
+        """Find if a combination of concepts is underexplored."""
+        return find_underexplored_combinations(concept1, concept2)
+    
+    @staticmethod
+    def suggest_directions(topic: str) -> List[str]:
+        """Suggest research directions based on gaps."""
+        return suggest_research_directions(topic)
+    
+    # Exports (NEW)
+    @staticmethod
+    def export_bibtex(paper_ids: Optional[List[str]] = None, filename: str = "papers.bib") -> str:
+        """Export papers to BibTeX."""
+        return export_to_bibtex(paper_ids, filename)
+    
+    @staticmethod
+    def export_csv(paper_ids: Optional[List[str]] = None, filename: str = "papers.csv") -> str:
+        """Export papers to CSV."""
+        return export_to_csv(paper_ids, filename)
+    
+    @staticmethod
+    def export_json(paper_ids: Optional[List[str]] = None, filename: str = "papers.json") -> str:
+        """Export papers to JSON."""
+        return export_to_json(paper_ids, filename)
+    
+    @staticmethod
+    def export_markdown(paper_ids: Optional[List[str]] = None, filename: str = "papers.md") -> str:
+        """Export papers to Markdown."""
+        return export_to_markdown(paper_ids, filename)
+    
+    @staticmethod
+    def export_rag(query: str, answer: str, citations: List[Dict], filename: str = "rag_session.md") -> str:
+        """Export a RAG session."""
+        return export_rag_session(query, answer, citations, filename)
+    
+    # Query Intent (NEW)
+    @staticmethod
+    def classify_intent(query: str) -> Dict:
+        """Classify query intent."""
+        return classify_query_intent(query)
+    
+    @staticmethod
+    def route_query(query: str) -> Dict:
+        """Route query to appropriate handler."""
+        return route_query_by_intent(query)
 
 
 # Convenience instance

@@ -475,3 +475,5 @@ def search_snippets(query: str, limit: int = 10, paper_ids: Optional[List[str]] 
         logger.error(f"Snippet search error: {e}")
         return []
 
+
+
