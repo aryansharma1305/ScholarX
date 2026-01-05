@@ -27,6 +27,7 @@ from ingestion.semantic_scholar_enhanced import (
 )
 from config.settings import settings
 from config.chroma_client import get_collection
+from api.relevance_ranking import rank_papers_by_relevance, get_relevance_category
 
 # Set to free mode
 settings.embedding_provider = "sentence-transformers"
@@ -133,40 +134,48 @@ def get_library_papers():
 
 def display_paper_card_with_ranking(paper: Dict, query: str = "", rank: int = 0, show_add_button: bool = True):
     """Display a paper card with relevance ranking."""
+    # Ensure get_relevance_category is available
+    try:
+        from api.relevance_ranking import get_relevance_category
+    except (ImportError, NameError):
+        # Fallback function if import fails
+        def get_relevance_category(score: float) -> Dict[str, str]:
+            if score >= 0.8:
+                return {"category": "Excellent Match", "color": "#28a745", "emoji": "🟢", "badge": "success"}
+            elif score >= 0.6:
+                return {"category": "Good Match", "color": "#17a2b8", "emoji": "🔵", "badge": "info"}
+            elif score >= 0.4:
+                return {"category": "Moderate Match", "color": "#ffc107", "emoji": "🟡", "badge": "warning"}
+            elif score >= 0.2:
+                return {"category": "Weak Match", "color": "#fd7e14", "emoji": "🟠", "badge": "warning"}
+            else:
+                return {"category": "Poor Match", "color": "#dc3545", "emoji": "🔴", "badge": "danger"}
+    
     source = paper.get("source", "unknown")
-    badge_class = "badge-arxiv" if source == "arxiv" else "badge-semantic"
     
     # Get relevance info
     relevance_score = paper.get("relevance_score", 0.0)
     relevance_percent = paper.get("relevance_percent", "N/A")
     relevance_info = get_relevance_category(relevance_score) if relevance_score > 0 and query else None
     
-    # Build relevance badge HTML
-    relevance_html = ""
+    # Display relevance badge using Streamlit components
     if relevance_info and query:
-        relevance_html = f"""
-        <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; padding: 0.5rem; background: linear-gradient(90deg, {relevance_info['color']}20, transparent); border-left: 4px solid {relevance_info['color']}; border-radius: 4px;">
-            <span style="font-size: 1.5rem;">{relevance_info['emoji']}</span>
-            <div>
-                <div style="font-weight: bold; color: {relevance_info['color']}; font-size: 1.1rem;">
-                    #{rank} - {relevance_percent} Match
-                </div>
-                <div style="font-size: 0.9rem; color: #666;">
-                    {relevance_info['category']}
-                </div>
-            </div>
-        </div>
-        """
+        col1, col2 = st.columns([1, 15])
+        with col1:
+            st.markdown(f"## {relevance_info['emoji']}")
+        with col2:
+            st.markdown(f"**#{rank} - {relevance_percent} Match** - {relevance_info['category']}")
     
-    st.markdown(f"""
-    <div class="paper-card">
-        {relevance_html}
-        <h3>{paper.get('title', 'Unknown')}</h3>
-        <p><strong>Authors:</strong> {paper.get('authors_string', paper.get('authors', 'Unknown'))}</p>
-        <p><strong>Year:</strong> {paper.get('year', 'N/A')}</p>
-        <span class="badge {badge_class}">{source.upper()}</span>
-    </div>
-    """, unsafe_allow_html=True)
+    # Display paper card using Streamlit native components
+    st.markdown(f"### {paper.get('title', 'Unknown')}")
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.markdown(f"**Authors:** {paper.get('authors_string', paper.get('authors', 'Unknown'))}")
+        st.markdown(f"**Year:** {paper.get('year', 'N/A')}")
+    with col2:
+        # Source badge
+        st.markdown(f"**Source:** {source.upper()}")
     
     # Show relevance progress bar
     if relevance_info and query:
