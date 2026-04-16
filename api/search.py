@@ -191,7 +191,11 @@ def get_paper_details_scholar_style(paper_id: str) -> Dict:
     
     paper = api.get_paper(paper_id)
     if not paper:
-        return {}
+        return {
+            "paper_id": paper_id,
+            "error": "paper_not_found",
+            "message": f"No paper found for id '{paper_id}'"
+        }
     
     citations = api.get_citations(paper_id)
     related = api.get_related_papers(paper_id, limit=10)
@@ -224,4 +228,3 @@ def get_paper_details_scholar_style(paper_id: str) -> Dict:
         },
         "top_chunks": paper.get("top_chunks", [])[:5]
     }
-

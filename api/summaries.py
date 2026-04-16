@@ -21,7 +21,13 @@ def generate_paper_summary(paper_id: str, use_llm: bool = False) -> Dict:
     """
     paper = get_paper_by_id(paper_id)
     if not paper:
-        return {}
+        return {
+            "paper_id": paper_id,
+            "error": "paper_not_found",
+            "short": "",
+            "medium": "",
+            "bullets": []
+        }
     
     abstract = paper.get("abstract", "")
     title = paper.get("title", "")
@@ -68,8 +74,8 @@ Format as JSON with keys: short, medium, bullets (array)."""
                     "medium": summaries.get("medium", abstract),
                     "bullets": summaries.get("bullets", [])
                 }
-            except:
-                pass
+            except Exception as parse_error:
+                logger.warning(f"Failed to parse LLM summary JSON: {parse_error}")
         except Exception as e:
             logger.warning(f"LLM summary failed: {e}, using extractive")
     
@@ -91,6 +97,5 @@ Format as JSON with keys: short, medium, bullets (array)."""
         "medium": medium,
         "bullets": bullets[:7]
     }
-
 
 

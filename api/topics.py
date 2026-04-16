@@ -22,14 +22,24 @@ def cluster_papers_by_topic(num_clusters: int = 5) -> Dict:
         import numpy as np
     except ImportError:
         logger.warning("scikit-learn not installed, cannot cluster")
-        return {}
+        return {
+            "status": "error",
+            "error": "missing_dependency",
+            "message": "scikit-learn is required for topic clustering",
+            "clusters": {}
+        }
     
     collection = get_collection()
     count = collection.count()
     
     if count < num_clusters:
         logger.warning(f"Not enough papers ({count}) for {num_clusters} clusters")
-        return {}
+        return {
+            "status": "insufficient_data",
+            "error": "not_enough_papers",
+            "message": f"Need at least {num_clusters} papers to cluster, found {count}",
+            "clusters": {}
+        }
     
     # Get all paper embeddings
     all_data = collection.get(limit=count)
@@ -58,7 +68,12 @@ def cluster_papers_by_topic(num_clusters: int = 5) -> Dict:
             }
     
     if len(paper_embeddings) < num_clusters:
-        return {}
+        return {
+            "status": "insufficient_data",
+            "error": "not_enough_unique_papers",
+            "message": f"Need at least {num_clusters} unique papers to cluster",
+            "clusters": {}
+        }
     
     # Perform K-Means clustering
     embeddings_list = list(paper_embeddings.values())
@@ -96,7 +111,10 @@ def cluster_papers_by_topic(num_clusters: int = 5) -> Dict:
         }
     
     logger.info(f"Created {len(result)} topic clusters")
-    return result
+    return {
+        "status": "ok",
+        "clusters": result
+    }
 
 
 def get_paper_topics(paper_id: str, num_clusters: int = 5) -> List[str]:
@@ -106,7 +124,8 @@ def get_paper_topics(paper_id: str, num_clusters: int = 5) -> List[str]:
     Returns:
         List of topic labels
     """
-    clusters = cluster_papers_by_topic(num_clusters)
+    cluster_result = cluster_papers_by_topic(num_clusters)
+    clusters = cluster_result.get("clusters", {})
     
     topics = []
     for cluster_info in clusters.values():
@@ -115,4 +134,3 @@ def get_paper_topics(paper_id: str, num_clusters: int = 5) -> List[str]:
             topics.append(cluster_info["topic"])
     
     return topics
-

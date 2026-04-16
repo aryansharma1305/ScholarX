@@ -51,6 +51,7 @@ virtualenv/
 
 # ChromaDB data
 chroma_db/
+chroma_db_backup_*/
 *.sqlite3
 *.db
 
@@ -110,6 +111,5 @@ credentials.json
 *.zip
 *.tar.gz
 *.rar
-
 
 

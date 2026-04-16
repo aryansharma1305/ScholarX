@@ -26,6 +26,13 @@ from api.exports import (
     export_to_bibtex, export_to_csv, export_to_json, export_to_markdown, export_rag_session
 )
 from api.query_intent import classify_query_intent, route_query_by_intent
+from api.visualization import (
+    visualize_citation_network,
+    get_influential_papers,
+    get_research_communities,
+    get_citation_statistics,
+    build_citation_graph
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -77,7 +84,11 @@ class ScholarXAPI:
     @staticmethod
     def cluster_topics(num_clusters: int = 5) -> Dict:
         """Cluster papers by topic."""
-        return cluster_papers_by_topic(num_clusters)
+        result = cluster_papers_by_topic(num_clusters)
+        # Backward-compatible return shape for existing UI callers.
+        if "clusters" in result:
+            return result["clusters"]
+        return result
     
     @staticmethod
     def get_paper_topics_api(paper_id: str) -> List[str]:
@@ -222,6 +233,11 @@ class ScholarXAPI:
     def find_gaps(topic: str, min_papers: int = 5) -> Dict:
         """Identify research gaps in a topic."""
         return identify_research_gaps(topic, min_papers)
+
+    @staticmethod
+    def identify_gaps(topic: str, min_papers: int = 5) -> Dict:
+        """Backward-compatible alias for find_gaps."""
+        return identify_research_gaps(topic, min_papers)
     
     @staticmethod
     def find_combination_gaps(concept1: str, concept2: str) -> Dict:
@@ -269,8 +285,31 @@ class ScholarXAPI:
     def route_query(query: str) -> Dict:
         """Route query to appropriate handler."""
         return route_query_by_intent(query)
+    
+    # Visualization (NEW)
+    @staticmethod
+    def visualize_citation_network(paper_ids: List[str], max_depth: int = 2, max_nodes: int = 50, layout: str = "spring"):
+        """Generate citation network visualization."""
+        return visualize_citation_network(paper_ids, max_depth, max_nodes, layout)
+    
+    @staticmethod
+    def get_influential_papers(paper_ids: List[str], top_k: int = 10) -> List[Dict]:
+        """Get influential papers using PageRank."""
+        graph = build_citation_graph(paper_ids)
+        return get_influential_papers(graph, top_k)
+    
+    @staticmethod
+    def get_research_communities(paper_ids: List[str]) -> Dict:
+        """Identify research communities in citation network."""
+        graph = build_citation_graph(paper_ids)
+        return get_research_communities(graph)
+    
+    @staticmethod
+    def get_citation_statistics_api(paper_ids: List[str]) -> Dict:
+        """Get citation network statistics."""
+        graph = build_citation_graph(paper_ids)
+        return get_citation_statistics(graph)
 
 
 # Convenience instance
 api = ScholarXAPI()
-

@@ -39,7 +39,8 @@ def save_user_history(history: Dict):
 def record_paper_view(paper_id: str, paper_title: str = ""):
     """Record that a user viewed a paper."""
     history = load_user_history()
-    if paper_id not in history["viewed_papers"]:
+    seen_paper_ids = {item.get("paper_id") for item in history.get("viewed_papers", [])}
+    if paper_id not in seen_paper_ids:
         history["viewed_papers"].append({
             "paper_id": paper_id,
             "title": paper_title,
@@ -234,4 +235,3 @@ def get_trending_topics(days: int = 30) -> List[Dict]:
         {"topic": topic, "frequency": count, "trend_score": count / max(topic_counts.values()) if topic_counts else 0}
         for topic, count in trending
     ]
-

@@ -1,11 +1,84 @@
 """Enhanced Semantic Scholar API integration with full API capabilities."""
 import requests
 import time
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from config.settings import settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+SEMANTIC_SCHOLAR_API_KEY = settings.semantic_scholar_api_key or ""
+MAX_RETRIES = 3
+BASE_RETRY_DELAY_SECONDS = 1.0
+
+
+def _build_headers() -> Dict[str, str]:
+    """Build request headers for Semantic Scholar API."""
+    headers = {"Accept": "application/json"}
+    if SEMANTIC_SCHOLAR_API_KEY:
+        headers["x-api-key"] = SEMANTIC_SCHOLAR_API_KEY
+    return headers
+
+
+def _retry_delay(response: requests.Response, attempt: int) -> float:
+    """Compute retry delay from Retry-After header or exponential backoff."""
+    retry_after = response.headers.get("Retry-After")
+    if retry_after:
+        try:
+            return max(float(retry_after), 0.5)
+        except ValueError:
+            pass
+    return BASE_RETRY_DELAY_SECONDS * (2 ** attempt)
+
+
+def _request_with_retries(
+    method: str,
+    url: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    json_body: Optional[Dict[str, Any]] = None,
+    timeout: int = 15,
+    max_retries: int = MAX_RETRIES
+) -> requests.Response:
+    """Make API request with retries for transient failures and rate limits."""
+    last_error: Optional[Exception] = None
+    for attempt in range(max_retries):
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                params=params,
+                json=json_body,
+                headers=_build_headers(),
+                timeout=timeout
+            )
+
+            if response.status_code == 429 and attempt < max_retries - 1:
+                delay = _retry_delay(response, attempt)
+                logger.warning("Semantic Scholar rate limited, retrying in %.1fs...", delay)
+                time.sleep(delay)
+                continue
+
+            response.raise_for_status()
+            return response
+        except requests.RequestException as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                delay = BASE_RETRY_DELAY_SECONDS * (2 ** attempt)
+                logger.warning(
+                    "Semantic Scholar request failed (attempt %s/%s): %s. Retrying in %.1fs.",
+                    attempt + 1,
+                    max_retries,
+                    e,
+                    delay
+                )
+                time.sleep(delay)
+                continue
+            raise
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("Semantic Scholar request failed after retries")
 
 
 def paper_autocomplete(query: str, limit: int = 10) -> List[Dict]:
@@ -26,13 +99,8 @@ def paper_autocomplete(query: str, limit: int = 10) -> List[Dict]:
         }
         
         logger.info(f"Getting autocomplete suggestions for: {query[:50]}")
-        response = requests.get(url, params=params, timeout=10)
+        response = _request_with_retries("GET", url, params=params, timeout=10)
         
-        if response.status_code == 429:
-            logger.warning("Semantic Scholar rate limit (autocomplete)")
-            return []
-        
-        response.raise_for_status()
         data = response.json()
         
         matches = data.get("matches", [])[:limit]
@@ -74,14 +142,14 @@ def batch_get_papers(paper_ids: List[str], fields: str = "title,authors,abstract
             batch = paper_ids[i:i+500]
             
             logger.info(f"Fetching batch {i//500 + 1} ({len(batch)} papers)")
-            response = requests.post(url, params=params, json={"ids": batch}, timeout=30)
+            response = _request_with_retries(
+                "POST",
+                url,
+                params=params,
+                json_body={"ids": batch},
+                timeout=30
+            )
             
-            if response.status_code == 429:
-                logger.warning("Rate limited, waiting 5 seconds...")
-                time.sleep(5)
-                continue
-            
-            response.raise_for_status()
             batch_results = response.json()
             all_results.extend(batch_results)
             
@@ -143,13 +211,7 @@ def search_papers_enhanced(
             params["venue"] = venue
         
         logger.info(f"Searching Semantic Scholar: {query} (filters: {params})")
-        response = requests.get(url, params=params, timeout=15)
-        
-        if response.status_code == 429:
-            logger.warning("Semantic Scholar rate limit reached")
-            return {"total": 0, "offset": 0, "next": 0, "data": []}
-        
-        response.raise_for_status()
+        response = _request_with_retries("GET", url, params=params, timeout=15)
         data = response.json()
         
         # Process results
@@ -204,17 +266,13 @@ def get_paper_details(paper_id: str, fields: str = "title,authors,abstract,year,
         params = {"fields": fields}
         
         logger.info(f"Fetching paper details: {paper_id}")
-        response = requests.get(url, params=params, timeout=15)
-        
-        if response.status_code == 429:
-            logger.warning("Rate limited")
-            return None
-        
-        if response.status_code == 404:
-            logger.warning(f"Paper not found: {paper_id}")
-            return None
-        
-        response.raise_for_status()
+        try:
+            response = _request_with_retries("GET", url, params=params, timeout=15)
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                logger.warning(f"Paper not found: {paper_id}")
+                return None
+            raise
         data = response.json()
         
         # Extract citations and references
@@ -285,13 +343,7 @@ def get_paper_citations(paper_id: str, limit: int = 100, offset: int = 0) -> Dic
         }
         
         logger.info(f"Fetching citations for: {paper_id}")
-        response = requests.get(url, params=params, timeout=15)
-        
-        if response.status_code == 429:
-            logger.warning("Rate limited")
-            return {"offset": 0, "next": 0, "data": []}
-        
-        response.raise_for_status()
+        response = _request_with_retries("GET", url, params=params, timeout=15)
         data = response.json()
         
         citations = []
@@ -338,13 +390,7 @@ def get_paper_references(paper_id: str, limit: int = 100, offset: int = 0) -> Di
         }
         
         logger.info(f"Fetching references for: {paper_id}")
-        response = requests.get(url, params=params, timeout=15)
-        
-        if response.status_code == 429:
-            logger.warning("Rate limited")
-            return {"offset": 0, "next": 0, "data": []}
-        
-        response.raise_for_status()
+        response = _request_with_retries("GET", url, params=params, timeout=15)
         data = response.json()
         
         references = []
@@ -390,13 +436,7 @@ def search_authors(query: str, limit: int = 10) -> Dict:
         }
         
         logger.info(f"Searching authors: {query}")
-        response = requests.get(url, params=params, timeout=15)
-        
-        if response.status_code == 429:
-            logger.warning("Rate limited")
-            return {"total": 0, "offset": 0, "next": 0, "data": []}
-        
-        response.raise_for_status()
+        response = _request_with_retries("GET", url, params=params, timeout=15)
         data = response.json()
         
         authors = []
@@ -445,13 +485,7 @@ def search_snippets(query: str, limit: int = 10, paper_ids: Optional[List[str]] 
             params["paperIds"] = ",".join(paper_ids[:100])  # Max 100 IDs
         
         logger.info(f"Searching snippets: {query[:50]}")
-        response = requests.get(url, params=params, timeout=15)
-        
-        if response.status_code == 429:
-            logger.warning("Rate limited")
-            return []
-        
-        response.raise_for_status()
+        response = _request_with_retries("GET", url, params=params, timeout=15)
         data = response.json()
         
         snippets = []
@@ -474,6 +508,5 @@ def search_snippets(query: str, limit: int = 10, paper_ids: Optional[List[str]] 
     except Exception as e:
         logger.error(f"Snippet search error: {e}")
         return []
-
 
 

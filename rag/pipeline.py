@@ -59,8 +59,17 @@ def run_rag_pipeline(
                 ingested_count = 0
                 for paper in papers:
                     try:
+                        pdf_url = paper.get("pdf_url")
+                        if not pdf_url:
+                            logger.warning(
+                                "Skipping paper %s: no PDF URL available from source %s",
+                                paper.get("paper_id"),
+                                paper.get("source", "unknown")
+                            )
+                            continue
+
                         paper_id = ingest_pdf_from_url(
-                            pdf_url=paper["pdf_url"],
+                            pdf_url=pdf_url,
                             paper_id=paper["paper_id"],
                             metadata={
                                 "title": paper.get("title", ""),

@@ -31,6 +31,20 @@ python3
 >>> result = query_rag("What is transformer architecture?")
 ```
 
+### Option 3: HTTP API Server (FastAPI)
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Run API server
+./run_api.sh
+# Or directly:
+uvicorn api.server:app --host 0.0.0.0 --port 8000
+
+# OpenAPI docs
+# http://localhost:8000/docs
+```
+
 ## 📁 Project Structure
 
 ```

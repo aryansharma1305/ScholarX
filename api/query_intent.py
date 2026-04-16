@@ -203,7 +203,7 @@ def route_query_by_intent(query: str, intent_classification: Optional[Dict] = No
         routing["suggestions"].append("Use trend analysis to see how topics evolved over time")
     
     elif intent == QueryIntent.RESEARCH_GAP:
-        routing["recommended_api"] = "identify_gaps"
+        routing["recommended_api"] = "find_gaps"
         routing["suggestions"].append("Use research gap identification to find underexplored areas")
     
     elif intent == QueryIntent.FACTUAL or intent == QueryIntent.HOW_TO:
@@ -217,4 +217,3 @@ def route_query_by_intent(query: str, intent_classification: Optional[Dict] = No
         routing["suggestions"].append("Use concise mode for quick answers")
     
     return routing
-
