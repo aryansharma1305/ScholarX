@@ -59,9 +59,12 @@ def upsert_chunks(
         # to make reprocessing idempotent (delete-then-add pattern)
         if ids:
             try:
-                # Delete existing chunks with these IDs to avoid duplicates
-                collection.delete(ids=ids)
-                logger.debug(f"Deleted {len(ids)} existing chunks before upsert")
+                # Delete only IDs that actually exist to avoid noisy warnings from backend.
+                existing = collection.get(ids=ids)
+                existing_ids = existing.get("ids", []) if existing else []
+                if existing_ids:
+                    collection.delete(ids=existing_ids)
+                    logger.debug(f"Deleted {len(existing_ids)} existing chunks before upsert")
             except Exception as delete_error:
                 # If deletion fails (e.g., chunks don't exist), that's okay
                 logger.debug(f"No existing chunks to delete: {delete_error}")

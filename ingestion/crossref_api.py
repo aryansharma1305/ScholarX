@@ -3,6 +3,7 @@ import requests
 import time
 from typing import List, Dict, Optional
 from utils.logger import get_logger
+from config.settings import settings
 
 logger = get_logger(__name__)
 
@@ -83,9 +84,11 @@ def search_crossref(
                 params["filter"] = ",".join(filter_parts)
         
         # Add polite pool header
-        headers = {
-            "User-Agent": "ScholarX/1.0 (mailto:your-email@example.com)"
-        }
+        user_agent = settings.crossref_user_agent or "ScholarX/1.0"
+        mailto = (settings.crossref_mailto or "").strip()
+        if mailto:
+            user_agent = f"{user_agent} (mailto:{mailto})"
+        headers = {"User-Agent": user_agent}
         
         logger.info(f"Searching Crossref: {params}")
         response = requests.get(url, params=params, headers=headers, timeout=15)
@@ -164,6 +167,5 @@ def get_crossref_by_doi(doi: str) -> Optional[Dict]:
     if result.get("items"):
         return result["items"][0]
     return None
-
 
 

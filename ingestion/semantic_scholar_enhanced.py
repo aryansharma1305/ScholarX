@@ -81,6 +81,55 @@ def _request_with_retries(
     raise RuntimeError("Semantic Scholar request failed after retries")
 
 
+def _format_semantic_error(error: Exception) -> str:
+    """Convert API errors into actionable messages for UI display."""
+    message = str(error)
+    if "429" in message:
+        if SEMANTIC_SCHOLAR_API_KEY:
+            return "Semantic Scholar API rate limited (429). Wait and retry."
+        return (
+            "Semantic Scholar API rate limited (429). Add SEMANTIC_SCHOLAR_API_KEY "
+            "in .env for higher quota, then restart the app."
+        )
+    return message
+
+
+def _normalize_paper_record(raw_paper: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize Semantic Scholar paper payloads into a common structure."""
+    paper = raw_paper.get("paper", raw_paper) if isinstance(raw_paper, dict) else {}
+    if not isinstance(paper, dict):
+        paper = {}
+
+    raw_authors = paper.get("authors", []) or []
+    authors: List[str] = []
+    for author in raw_authors:
+        if isinstance(author, dict):
+            name = author.get("name")
+            if name:
+                authors.append(name)
+        elif isinstance(author, str):
+            authors.append(author)
+
+    pdf_url = None
+    open_access_pdf = paper.get("openAccessPdf")
+    if isinstance(open_access_pdf, dict):
+        pdf_url = open_access_pdf.get("url")
+
+    return {
+        "paper_id": paper.get("paperId"),
+        "title": paper.get("title", "Untitled"),
+        "authors": authors,
+        "authors_string": ", ".join(authors) if authors else "Unknown",
+        "abstract": paper.get("abstract"),
+        "year": paper.get("year"),
+        "pdf_url": pdf_url,
+        "url": paper.get("url"),
+        "citation_count": paper.get("citationCount", 0),
+        "reference_count": paper.get("referenceCount", 0),
+        "source": "semantic_scholar"
+    }
+
+
 def paper_autocomplete(query: str, limit: int = 10) -> List[Dict]:
     """
     Suggest paper query completions for interactive search.
@@ -216,38 +265,26 @@ def search_papers_enhanced(
         
         # Process results
         papers = data.get("data", [])
-        results = []
-        for paper in papers:
-            authors = [author.get("name", "") for author in paper.get("authors", []) if author.get("name")]
-            pdf_url = None
-            if paper.get("openAccessPdf"):
-                pdf_url = paper["openAccessPdf"].get("url")
-            
-            results.append({
-                "paper_id": paper.get("paperId"),
-                "title": paper.get("title", "Untitled"),
-                "authors": authors,
-                "authors_string": ", ".join(authors) if authors else "Unknown",
-                "abstract": paper.get("abstract"),
-                "year": paper.get("year"),
-                "pdf_url": pdf_url,
-                "url": paper.get("url"),
-                "citation_count": paper.get("citationCount", 0),
-                "reference_count": paper.get("referenceCount", 0),
-                "source": "semantic_scholar"
-            })
+        results = [_normalize_paper_record(paper) for paper in papers]
         
         logger.info(f"Found {len(results)} papers (total: {data.get('total', 0)})")
         return {
             "total": data.get("total", 0),
             "offset": data.get("offset", 0),
             "next": data.get("next", 0),
-            "data": results
+            "data": results,
+            "error": None
         }
         
     except Exception as e:
         logger.error(f"Enhanced search error: {e}")
-        return {"total": 0, "offset": 0, "next": 0, "data": []}
+        return {
+            "total": 0,
+            "offset": 0,
+            "next": 0,
+            "data": [],
+            "error": _format_semantic_error(e)
+        }
 
 
 def get_paper_details(paper_id: str, fields: str = "title,authors,abstract,year,openAccessPdf,citationCount,referenceCount,citations,references") -> Optional[Dict]:
@@ -454,12 +491,80 @@ def search_authors(query: str, limit: int = 10) -> Dict:
             "total": data.get("total", 0),
             "offset": data.get("offset", 0),
             "next": data.get("next", 0),
-            "data": authors
+            "data": authors,
+            "error": None
         }
         
     except Exception as e:
         logger.error(f"Author search error: {e}")
-        return {"total": 0, "offset": 0, "next": 0, "data": []}
+        return {
+            "total": 0,
+            "offset": 0,
+            "next": 0,
+            "data": [],
+            "error": _format_semantic_error(e)
+        }
+
+
+def get_author_papers(
+    author_id: str,
+    limit: int = 20,
+    offset: int = 0,
+    fields: str = "paperId,title,authors,abstract,year,openAccessPdf,url,citationCount,referenceCount"
+) -> Dict:
+    """
+    Fetch papers for a specific Semantic Scholar author.
+
+    Args:
+        author_id: Semantic Scholar authorId
+        limit: Max results (<= 1000)
+        offset: Pagination offset
+        fields: Comma-separated paper fields
+
+    Returns:
+        Dictionary with paging metadata and normalized paper list
+    """
+    if not author_id:
+        return {
+            "total": 0,
+            "offset": 0,
+            "next": 0,
+            "data": [],
+            "error": "Missing author_id for Semantic Scholar author papers request."
+        }
+
+    try:
+        url = f"{settings.semantic_scholar_base_url}/author/{author_id}/papers"
+        params = {
+            "limit": min(limit, 1000),
+            "offset": max(offset, 0),
+            "fields": fields
+        }
+
+        logger.info("Fetching Semantic Scholar papers for author_id=%s", author_id)
+        response = _request_with_retries("GET", url, params=params, timeout=20)
+        data = response.json()
+
+        raw_items = data.get("data", []) or []
+        papers = [_normalize_paper_record(item) for item in raw_items]
+        papers = [paper for paper in papers if paper.get("title")]
+
+        return {
+            "total": data.get("total", len(papers)),
+            "offset": data.get("offset", 0),
+            "next": data.get("next", 0),
+            "data": papers,
+            "error": None
+        }
+    except Exception as e:
+        logger.error("Author papers fetch error for author_id=%s: %s", author_id, e)
+        return {
+            "total": 0,
+            "offset": 0,
+            "next": 0,
+            "data": [],
+            "error": _format_semantic_error(e)
+        }
 
 
 def search_snippets(query: str, limit: int = 10, paper_ids: Optional[List[str]] = None) -> List[Dict]:
@@ -508,5 +613,4 @@ def search_snippets(query: str, limit: int = 10, paper_ids: Optional[List[str]] 
     except Exception as e:
         logger.error(f"Snippet search error: {e}")
         return []
-
 

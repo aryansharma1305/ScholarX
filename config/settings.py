@@ -51,6 +51,8 @@ class Settings:
     semantic_scholar_base_url: str = "https://api.semanticscholar.org/graph/v1"
     semantic_scholar_api_key: str = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
     arxiv_base_url: str = "http://export.arxiv.org/api/query"
+    crossref_mailto: str = os.getenv("CROSSREF_MAILTO", "")
+    crossref_user_agent: str = os.getenv("CROSSREF_USER_AGENT", "ScholarX/1.0")
     
     # Performance
     enable_caching: bool = os.getenv("ENABLE_CACHING", "false").lower() == "true"

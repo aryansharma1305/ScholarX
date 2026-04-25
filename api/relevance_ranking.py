@@ -43,8 +43,8 @@ def calculate_relevance_score(
     query_words = set(query_lower.split())
     
     # Get paper text
-    title = paper.get("title", "").lower()
-    abstract = paper.get("abstract", "").lower()
+    title = (paper.get("title") or "").lower()
+    abstract = (paper.get("abstract") or "").lower()
     full_text = f"{title} {abstract}"
     
     # 1. Keyword matching (title + abstract)

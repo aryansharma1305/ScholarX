@@ -81,10 +81,9 @@ def search_openalex(
                 pdf_url = item["open_access"].get("oa_url")
             
             # Get primary location PDF
-            if not pdf_url and item.get("primary_location"):
-                loc = item["primary_location"]
-                if loc.get("pdf_url"):
-                    pdf_url = loc["pdf_url"]
+            primary_loc = item.get("primary_location") or {}
+            if not pdf_url and primary_loc.get("pdf_url"):
+                pdf_url = primary_loc["pdf_url"]
             
             # Get concepts (fields/topics)
             concepts = []
@@ -104,8 +103,8 @@ def search_openalex(
                 "doi": item.get("doi"),
                 "citation_count": item.get("cited_by_count", 0),
                 "concepts": concepts,
-                "open_access": item.get("open_access", {}).get("is_oa", False),
-                "venue": item.get("primary_location", {}).get("source", {}).get("display_name"),
+                "open_access": (item.get("open_access") or {}).get("is_oa", False),
+                "venue": ((item.get("primary_location") or {}).get("source") or {}).get("display_name"),
                 "source": "openalex"
             })
         

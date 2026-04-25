@@ -1,11 +1,63 @@
 """Enhanced ArXiv API integration with full query capabilities."""
 import requests
 import feedparser
+import time
 from typing import List, Dict, Optional
 from config.settings import settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+MAX_RETRIES = 3
+BASE_RETRY_DELAY_SECONDS = 1.0
+
+
+def _retry_delay(response: requests.Response, attempt: int) -> float:
+    """Compute retry delay using Retry-After header when available."""
+    retry_after = response.headers.get("Retry-After")
+    if retry_after:
+        try:
+            return max(float(retry_after), 0.5)
+        except ValueError:
+            pass
+    return BASE_RETRY_DELAY_SECONDS * (2 ** attempt)
+
+
+def _request_arxiv_with_retries(params: Dict, timeout: int = 15, max_retries: int = MAX_RETRIES) -> requests.Response:
+    """Make ArXiv API request with retries for transient/rate-limit failures."""
+    transient_codes = {429, 500, 502, 503, 504}
+
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(settings.arxiv_base_url, params=params, timeout=timeout)
+            if response.status_code in transient_codes and attempt < max_retries - 1:
+                delay = _retry_delay(response, attempt)
+                logger.warning(
+                    "ArXiv request got status %s (attempt %s/%s). Retrying in %.1fs.",
+                    response.status_code,
+                    attempt + 1,
+                    max_retries,
+                    delay
+                )
+                time.sleep(delay)
+                continue
+
+            response.raise_for_status()
+            return response
+        except requests.RequestException as e:
+            if attempt < max_retries - 1:
+                delay = BASE_RETRY_DELAY_SECONDS * (2 ** attempt)
+                logger.warning(
+                    "ArXiv request failed (attempt %s/%s): %s. Retrying in %.1fs.",
+                    attempt + 1,
+                    max_retries,
+                    e,
+                    delay
+                )
+                time.sleep(delay)
+                continue
+            raise
+
+    raise RuntimeError("ArXiv request failed after retries")
 
 
 def search_arxiv_enhanced(
@@ -65,7 +117,7 @@ def search_arxiv_enhanced(
             params["id_list"] = ",".join(id_list)
         
         logger.info(f"Searching ArXiv with params: {params}")
-        response = requests.get(settings.arxiv_base_url, params=params, timeout=30)
+        response = _request_arxiv_with_retries(params=params, timeout=15)
         response.raise_for_status()
         
         feed = feedparser.parse(response.content)
@@ -73,7 +125,7 @@ def search_arxiv_enhanced(
         # Check for errors
         if feed.bozo and feed.bozo_exception:
             logger.error(f"ArXiv API error: {feed.bozo_exception}")
-            return {"total": 0, "entries": []}
+            return {"total": 0, "entries": [], "error": str(feed.bozo_exception)}
         
         # Extract feed metadata
         total_results = int(feed.feed.get("opensearch_totalresults", 0))
@@ -157,12 +209,13 @@ def search_arxiv_enhanced(
             "total": total_results,
             "start": start_index,
             "items_per_page": items_per_page,
-            "entries": entries
+            "entries": entries,
+            "error": None
         }
         
     except Exception as e:
         logger.error(f"Error searching ArXiv: {e}")
-        return {"total": 0, "entries": []}
+        return {"total": 0, "entries": [], "error": str(e)}
 
 
 def search_arxiv_by_field(
@@ -255,6 +308,4 @@ def search_arxiv_with_boolean(
     
     result = search_arxiv_enhanced(query=query, max_results=max_results)
     return result.get("entries", [])
-
-
 

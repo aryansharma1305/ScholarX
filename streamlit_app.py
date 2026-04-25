@@ -3,6 +3,10 @@ import streamlit as st
 import sys
 import json
 import time
+import os
+import hashlib
+import re
+import tempfile
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -15,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from main import query_rag, search_papers
 from api.main_api import api
 from manage_papers import get_statistics
-from ingestion.ingest_pipeline import ingest_pdf_from_url
+from ingestion.ingest_pipeline import ingest_pdf_from_url, ingest_pdf_from_file
 from ingestion.paper_fetcher import search_arxiv, search_semantic_scholar
 from ingestion.arxiv_enhanced import (
     search_arxiv_enhanced, search_arxiv_by_author, search_arxiv_by_title,
@@ -23,15 +27,27 @@ from ingestion.arxiv_enhanced import (
 )
 from ingestion.semantic_scholar_enhanced import (
     search_papers_enhanced, paper_autocomplete, get_paper_details,
-    get_paper_citations, get_paper_references, search_authors, search_snippets
+    get_paper_citations, get_paper_references, search_authors, get_author_papers,
+    search_snippets
 )
+from ingestion.crossref_api import search_crossref
+from ingestion.openalex_api import search_openalex
 from config.settings import settings
 from config.chroma_client import get_collection
 from api.relevance_ranking import rank_papers_by_relevance, get_relevance_category
+from api.visualization import (
+    visualize_citation_network, 
+    get_influential_papers, 
+    get_research_communities,
+    get_citation_statistics,
+    build_citation_graph
+)
+import networkx as nx
 
 # Set to free mode
 settings.embedding_provider = "sentence-transformers"
 settings.llm_provider = "simple"
+CURRENT_YEAR = datetime.now().year
 
 # Page config
 st.set_page_config(
@@ -132,6 +148,69 @@ def get_library_papers():
         return []
 
 
+def remove_paper_from_library(paper_id: str) -> bool:
+    """Remove all chunks for a paper from the vector store."""
+    try:
+        collection = get_collection()
+        existing = collection.get(where={"paper_id": paper_id})
+        chunk_ids = existing.get("ids", []) if existing else []
+        if not chunk_ids:
+            return False
+        collection.delete(ids=chunk_ids)
+        return True
+    except Exception as e:
+        st.error(f"Error removing paper {paper_id}: {e}")
+        return False
+
+
+def _paper_widget_id(paper: Dict) -> str:
+    """Create a stable unique ID for UI widgets even when paper_id is missing."""
+    base_id = str(
+        paper.get("paper_id")
+        or paper.get("doi")
+        or paper.get("url")
+        or f"{paper.get('title', '')}|{paper.get('year', '')}|{paper.get('source', '')}"
+    )
+    return hashlib.md5(base_id.encode("utf-8")).hexdigest()[:12]
+
+
+def _resolve_pdf_url(paper: Dict) -> Optional[str]:
+    """
+    Resolve a direct PDF URL from a paper record.
+
+    Returns None when only a landing page is available.
+    """
+    direct_candidates = [
+        paper.get("pdf_url"),
+        paper.get("pdfUrl")
+    ]
+
+    for candidate in direct_candidates:
+        if candidate and isinstance(candidate, str):
+            return candidate
+
+    # ArXiv link conversion
+    url = str(paper.get("url") or "")
+    if "arxiv.org/abs/" in url:
+        arxiv_id = url.split("arxiv.org/abs/")[-1].split("?")[0].strip()
+        if arxiv_id:
+            return f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+    if "arxiv.org/pdf/" in url and url.endswith(".pdf"):
+        return url
+
+    if paper.get("source") == "arxiv":
+        arxiv_id = str(paper.get("paper_id") or paper.get("arxiv_id") or "").strip()
+        if arxiv_id:
+            arxiv_id = arxiv_id.replace("arXiv:", "").replace("arxiv:", "")
+            return f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+
+    # Generic URL fallback only when it clearly points to a PDF file
+    if url and re.search(r"\.pdf($|[?#])", url.lower()):
+        return url
+
+    return None
+
+
 def display_paper_card_with_ranking(paper: Dict, query: str = "", rank: int = 0, show_add_button: bool = True):
     """Display a paper card with relevance ranking."""
     # Ensure get_relevance_category is available
@@ -197,17 +276,40 @@ def display_paper_card_with_ranking(paper: Dict, query: str = "", rank: int = 0,
         with st.expander("📄 Abstract"):
             st.write(paper["abstract"])
     
+    widget_id = _paper_widget_id(paper)
+    pdf_url = _resolve_pdf_url(paper)
+
     col1, col2, col3 = st.columns(3)
     with col1:
-        if paper.get("pdf_url"):
-            st.link_button("📥 Download PDF", paper["pdf_url"])
+        if pdf_url:
+            st.link_button("📥 Download PDF", pdf_url)
+        else:
+            st.info("📄 No PDF available")
     with col2:
         if show_add_button:
-            if st.button("➕ Add to Library", key=f"add_{paper.get('paper_id')}"):
-                process_paper_for_rag(paper)
+            # Check if paper is already in library
+            paper_id = str(paper.get("paper_id") or "")
+            paper_title = str(paper.get("title") or "").strip().lower()
+            library = get_library_papers()
+            is_in_library = any(
+                (paper_id and str(p.get("paper_id") or "") == paper_id)
+                or (paper_title and str(p.get("title") or "").strip().lower() == paper_title)
+                for p in library
+            )
+            
+            # Check if PDF URL is available
+            has_pdf = bool(pdf_url)
+            
+            if is_in_library:
+                st.success("✅ Already in Library")
+            elif has_pdf:
+                if st.button("➕ Add to Library", key=f"add_card_{widget_id}", type="primary"):
+                    process_paper_for_rag(paper)
+            else:
+                st.warning("⚠️ No PDF URL")
     with col3:
-        if st.button("📊 View Details", key=f"view_{paper.get('paper_id')}"):
-            st.session_state[f"view_paper_{paper.get('paper_id')}"] = paper
+        if st.button("📊 View Details", key=f"view_card_{widget_id}"):
+            st.session_state[f"view_paper_{widget_id}"] = paper
             st.rerun()
     
     st.divider()
@@ -216,23 +318,6 @@ def display_paper_card_with_ranking(paper: Dict, query: str = "", rank: int = 0,
 def display_paper_card(paper: Dict, show_add_button: bool = True):
     """Display a paper card with all metadata."""
     display_paper_card_with_ranking(paper, query="", rank=0, show_add_button=show_add_button)
-    
-    if paper.get("abstract"):
-        with st.expander("📄 Abstract"):
-            st.write(paper["abstract"])
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if paper.get("pdf_url"):
-            st.link_button("📥 Download PDF", paper["pdf_url"])
-    with col2:
-        if show_add_button:
-            if st.button("➕ Add to Library", key=f"add_{paper.get('paper_id')}"):
-                process_paper_for_rag(paper)
-    with col3:
-        if st.button("📊 View Details", key=f"view_{paper.get('paper_id')}"):
-            st.session_state[f"view_paper_{paper.get('paper_id')}"] = paper
-            st.rerun()
     
     # Paper details view
     for key in st.session_state.keys():
@@ -249,8 +334,9 @@ def display_paper_card(paper: Dict, show_add_button: bool = True):
                     st.write(paper["abstract"])
                 
                 # Get enhanced details from Semantic Scholar if available
+                detail_widget_id = _paper_widget_id(paper)
                 if paper.get("paper_id") and paper.get("source") == "semantic_scholar":
-                    if st.button("🔍 Get Full Details", key=f"details_{paper.get('paper_id')}"):
+                    if st.button("🔍 Get Full Details", key=f"details_{detail_widget_id}"):
                         with st.spinner("Fetching detailed information..."):
                             try:
                                 details = get_paper_details(paper.get("paper_id"))
@@ -279,19 +365,23 @@ def display_paper_card(paper: Dict, show_add_button: bool = True):
                             except Exception as e:
                                 st.error(f"Error fetching details: {e}")
                 
-                if st.button("❌ Close", key=f"close_{paper.get('paper_id')}"):
+                if st.button("❌ Close", key=f"close_{detail_widget_id}"):
                     del st.session_state[key]
                     st.rerun()
 
 
 def process_paper_for_rag(paper: Dict):
     """Process a paper for RAG."""
-    pdf_url = paper.get("pdf_url")
+    # Resolve direct PDF URL only (landing pages are not ingestible)
+    pdf_url = _resolve_pdf_url(paper)
+    
     if not pdf_url:
-        st.error("No PDF URL available")
+        st.error("❌ No downloadable PDF URL found for this paper.")
+        st.info("💡 Use ArXiv or an open-access source where a direct PDF link is available, then try again.")
         return
     
-    task_id = paper.get("paper_id", "unknown")
+    task_id = str(paper.get("paper_id") or _paper_widget_id(paper))
+    
     st.session_state.processing_tasks[task_id] = {
         "status": "processing",
         "paper": paper,
@@ -299,45 +389,60 @@ def process_paper_for_rag(paper: Dict):
     }
     
     try:
-        with st.spinner(f"Processing {paper.get('title', 'paper')}..."):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            status_text.text("Downloading PDF...")
-            progress_bar.progress(20)
-            
-            status_text.text("Extracting text...")
-            progress_bar.progress(40)
-            
-            status_text.text("Chunking content...")
-            progress_bar.progress(60)
-            
-            status_text.text("Generating embeddings...")
-            progress_bar.progress(80)
-            
-            paper_id = ingest_pdf_from_url(
-                pdf_url=pdf_url,
-                paper_id=paper.get("paper_id"),
-                metadata={
-                    "title": paper.get("title", ""),
-                    "authors": paper.get("authors_string", paper.get("authors", "")),
-                    "abstract": paper.get("abstract", ""),
-                    "year": paper.get("year"),
-                    "source": paper.get("source", "api"),
-                }
-            )
-            
-            status_text.text("Storing in vector database...")
-            progress_bar.progress(100)
-            
-            st.session_state.processing_tasks[task_id]["status"] = "completed"
-            st.success(f"✅ Paper processed successfully! (ID: {paper_id})")
-            time.sleep(1)
-            st.rerun()
+        # Create a placeholder for status messages
+        status_container = st.empty()
+        status_container.info(f"🔄 Processing: {paper.get('title', 'Paper')[:60]}...")
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        status_text.text("📥 Downloading PDF...")
+        progress_bar.progress(10)
+        
+        status_text.text("📄 Extracting text from PDF...")
+        progress_bar.progress(30)
+        
+        status_text.text("✂️ Chunking content...")
+        progress_bar.progress(50)
+        
+        status_text.text("🧮 Generating embeddings...")
+        progress_bar.progress(70)
+        
+        # Ingest the paper
+        paper_id = ingest_pdf_from_url(
+            pdf_url=pdf_url,
+            paper_id=paper.get("paper_id"),
+            metadata={
+                "title": paper.get("title", ""),
+                "authors": paper.get("authors_string", paper.get("authors", "")),
+                "abstract": paper.get("abstract", ""),
+                "year": paper.get("year"),
+                "source": paper.get("source", "api"),
+            }
+        )
+        
+        status_text.text("💾 Storing in vector database...")
+        progress_bar.progress(90)
+        
+        status_text.text("✅ Complete!")
+        progress_bar.progress(100)
+        
+        st.session_state.processing_tasks[task_id]["status"] = "completed"
+        
+        # Clear status messages
+        status_container.empty()
+        status_text.empty()
+        progress_bar.empty()
+        
+        # Show success message
+        st.success(f"✅ **Paper added to library successfully!**\n\n**Title:** {paper.get('title', 'Unknown')}\n**ID:** {paper_id}")
+        time.sleep(2)
+        st.rerun()
             
     except Exception as e:
         st.session_state.processing_tasks[task_id]["status"] = "failed"
-        st.error(f"❌ Processing failed: {e}")
+        st.error(f"❌ **Failed to add paper to library:**\n\n{str(e)}")
+        st.exception(e)  # Show full traceback for debugging
 
 
 # Main App
@@ -442,10 +547,10 @@ with tab2:
         with col1:
             query = st.text_input("Enter search query:", placeholder="e.g., transformer architecture, attention mechanism", key="search_query")
         with col2:
-            source = st.selectbox("Source", ["Both", "ArXiv", "Semantic Scholar"])
+            source = st.selectbox("Source", ["Both", "ArXiv", "Semantic Scholar", "Crossref", "OpenAlex", "All Sources"])
         
         # ArXiv query builder helper
-        if source in ["Both", "ArXiv"]:
+        if source in ["Both", "ArXiv", "All Sources"]:
             with st.expander("🔧 ArXiv Query Builder"):
                 st.markdown("**Field Prefixes:**")
                 st.code("ti:title  au:author  abs:abstract  cat:category  all:everything")
@@ -474,7 +579,7 @@ with tab2:
             
             with col2:
                 # Semantic Scholar filters
-                if source in ["Both", "Semantic Scholar"]:
+                if source in ["Both", "Semantic Scholar", "All Sources"]:
                     year_range = st.text_input("Year range (e.g., 2020-2024)", placeholder="2020-2024")
                     fields_of_study = st.multiselect(
                         "Fields of Study",
@@ -486,15 +591,20 @@ with tab2:
         
         col1, col2, col3 = st.columns(3)
         with col1:
-            year_filter = st.number_input("Year (optional)", min_value=1900, max_value=2025, value=None, key="year_filter")
+            year_filter = st.number_input("Year (optional)", min_value=1900, max_value=CURRENT_YEAR, value=None, key="year_filter")
         with col2:
             pdf_only = st.checkbox("PDF available only", True)
         with col3:
             max_results = st.slider("Max results", 5, 50, 10)
         
-        # Autocomplete suggestions
+        # Autocomplete suggestions — only fires when query is stable (not on every keystroke)
         if query and len(query) > 2:
-            with st.spinner("Getting suggestions..."):
+            last_query = st.session_state.get("_last_autocomplete_query", "")
+            if query != last_query:
+                # Query just changed — store it, skip API call this render
+                st.session_state["_last_autocomplete_query"] = query
+            else:
+                # Query is stable — safe to call API
                 try:
                     suggestions = paper_autocomplete(query, limit=5)
                     if suggestions:
@@ -503,7 +613,7 @@ with tab2:
                             if st.button(f"📄 {sug.get('title', 'Unknown')[:60]}...", key=f"sug_{sug.get('paper_id')}"):
                                 st.session_state["search_query"] = sug.get("title", query)
                                 st.rerun()
-                except:
+                except Exception:
                     pass
         
         if st.button("🔍 Search", type="primary"):
@@ -513,7 +623,7 @@ with tab2:
                         papers = []
                         
                         # Enhanced ArXiv search
-                        if source in ["Both", "ArXiv"]:
+                        if source in ["Both", "ArXiv", "All Sources"]:
                             try:
                                 # Determine field
                                 field_map = {
@@ -537,7 +647,12 @@ with tab2:
                                     sort_by=sort_by,
                                     sort_order="descending"
                                 )
+                                arxiv_error = arxiv_result.get("error")
+                                if arxiv_error:
+                                    st.warning(f"ArXiv API issue: {arxiv_error}")
                                 arxiv_papers = arxiv_result.get("entries", [])
+                                if arxiv_error and not arxiv_papers:
+                                    arxiv_papers = search_arxiv(query, max_results=max_results)
                                 papers.extend(arxiv_papers)
                                 
                                 if arxiv_result.get("total", 0) > 0:
@@ -549,7 +664,7 @@ with tab2:
                                 papers.extend(arxiv_papers)
                         
                         # Enhanced Semantic Scholar search
-                        if source in ["Both", "Semantic Scholar"]:
+                        if source in ["Both", "Semantic Scholar", "All Sources"]:
                             try:
                                 semantic_result = search_papers_enhanced(
                                     query=query,
@@ -559,13 +674,44 @@ with tab2:
                                     open_access_only=open_access_only,
                                     min_citation_count=min_citations if min_citations > 0 else None
                                 )
+                                semantic_error = semantic_result.get("error")
+                                if semantic_error:
+                                    st.warning(f"Semantic Scholar API issue: {semantic_error}")
                                 semantic_papers = semantic_result.get("data", [])
                                 papers.extend(semantic_papers)
                                 
                                 if semantic_result.get("total", 0) > 0:
                                     st.info(f"📊 Semantic Scholar found {semantic_result.get('total', 0)} total papers")
                             except Exception as e:
-                                st.warning(f"Semantic Scholar search failed: {e}. Using ArXiv only.")
+                                st.warning(f"Semantic Scholar search failed: {e}")
+                        
+                        # Crossref search
+                        if source in ["Crossref", "All Sources"]:
+                            try:
+                                crossref_result = search_crossref(
+                                    query=query,
+                                    rows=min(max_results, 100)  # Crossref max is 1000, but we limit
+                                )
+                                crossref_papers = crossref_result.get("items", [])
+                                if crossref_papers:
+                                    papers.extend(crossref_papers)
+                                    st.info(f"📊 Crossref found {crossref_result.get('total', 0)} total papers")
+                            except Exception as e:
+                                st.warning(f"Crossref search failed: {e}")
+                        
+                        # OpenAlex search
+                        if source in ["OpenAlex", "All Sources"]:
+                            try:
+                                openalex_result = search_openalex(
+                                    query=query,
+                                    per_page=min(max_results, 200)  # OpenAlex max is 200
+                                )
+                                openalex_papers = openalex_result.get("items", [])
+                                if openalex_papers:
+                                    papers.extend(openalex_papers)
+                                    st.info(f"📊 OpenAlex found {openalex_result.get('total', 0)} total papers")
+                            except Exception as e:
+                                st.warning(f"OpenAlex search failed: {e}")
                         
                         # Filter by year
                         if year_filter:
@@ -621,12 +767,122 @@ with tab2:
     
     elif search_type == "Author":
         author = st.text_input("Enter author name:", placeholder="e.g., Geoffrey Hinton")
+        source_author = st.selectbox("Source", ["Both", "ArXiv", "Semantic Scholar"], key="author_source")
         if st.button("🔍 Search", type="primary"):
             if author:
                 with st.spinner(f"Searching for papers by {author}..."):
                     try:
-                        results = api.search(author=author, limit=20)
-                        papers = results.get("papers", [])
+                        papers = []
+
+                        # ArXiv author search (external API)
+                        if source_author in ["Both", "ArXiv"]:
+                            try:
+                                arxiv_result = search_arxiv_enhanced(
+                                    query=author,
+                                    field="au",
+                                    max_results=20,
+                                    sort_by="relevance",
+                                    sort_order="descending"
+                                )
+                                arxiv_error = arxiv_result.get("error")
+                                if arxiv_error:
+                                    st.warning(f"ArXiv API issue: {arxiv_error}")
+                                arxiv_papers = arxiv_result.get("entries", [])
+                                papers.extend(arxiv_papers)
+                                st.info(f"📊 ArXiv found {len(arxiv_papers)} papers for author search")
+                            except Exception as e:
+                                st.warning(f"ArXiv author search failed: {e}")
+
+                        # Semantic Scholar author-oriented search (external API)
+                        if source_author in ["Both", "Semantic Scholar"]:
+                            try:
+                                author_query = " ".join(author.lower().split())
+                                author_query_tokens = [token for token in author_query.split() if token]
+
+                                def author_match_score(name: str) -> int:
+                                    normalized_name = " ".join((name or "").lower().split())
+                                    if not normalized_name:
+                                        return 0
+                                    if normalized_name == author_query:
+                                        return 3
+                                    if author_query and author_query in normalized_name:
+                                        return 2
+                                    if author_query_tokens and all(token in normalized_name for token in author_query_tokens):
+                                        return 1
+                                    return 0
+
+                                author_result = search_authors(author, limit=10)
+                                author_error = author_result.get("error")
+                                if author_error:
+                                    st.warning(f"Semantic Scholar author lookup issue: {author_error}")
+
+                                author_profiles = author_result.get("data", [])
+                                ranked_profiles = sorted(
+                                    author_profiles,
+                                    key=lambda profile: (
+                                        author_match_score(profile.get("name", "")),
+                                        profile.get("paper_count", 0),
+                                        profile.get("citation_count", 0)
+                                    ),
+                                    reverse=True
+                                )
+
+                                selected_profiles = [p for p in ranked_profiles if author_match_score(p.get("name", "")) > 0][:3]
+                                if not selected_profiles and ranked_profiles:
+                                    selected_profiles = ranked_profiles[:1]
+
+                                semantic_papers = []
+                                profile_fetch_errors = []
+
+                                for profile in selected_profiles:
+                                    author_id = profile.get("author_id")
+                                    if not author_id:
+                                        continue
+
+                                    profile_papers = get_author_papers(author_id=author_id, limit=20)
+                                    if profile_papers.get("error"):
+                                        profile_fetch_errors.append(
+                                            f"{profile.get('name', 'Unknown')}: {profile_papers.get('error')}"
+                                        )
+                                        continue
+
+                                    semantic_papers.extend(profile_papers.get("data", []))
+
+                                if not semantic_papers:
+                                    fallback_result = search_papers_enhanced(query=author, limit=20)
+                                    fallback_error = fallback_result.get("error")
+                                    if fallback_error:
+                                        profile_fetch_errors.append(f"fallback paper search: {fallback_error}")
+                                    semantic_papers = fallback_result.get("data", [])
+                                    semantic_papers = [
+                                        p for p in semantic_papers
+                                        if author_query in (p.get("authors_string", "").lower())
+                                    ]
+
+                                for err in profile_fetch_errors:
+                                    st.warning(f"Semantic Scholar API issue: {err}")
+
+                                papers.extend(semantic_papers)
+                                if selected_profiles:
+                                    st.info(
+                                        f"📊 Semantic Scholar matched {len(selected_profiles)} author profile(s) "
+                                        f"and returned {len(semantic_papers)} papers"
+                                    )
+                                else:
+                                    st.info(f"📊 Semantic Scholar returned {len(semantic_papers)} author-matched papers")
+                            except Exception as e:
+                                st.warning(f"Semantic Scholar author search failed: {e}")
+
+                        # Deduplicate by title
+                        seen_titles = set()
+                        unique_papers = []
+                        for paper in papers:
+                            title_lower = paper.get("title", "").lower()
+                            if title_lower and title_lower not in seen_titles:
+                                seen_titles.add(title_lower)
+                                unique_papers.append(paper)
+
+                        papers = unique_papers
                         if papers:
                             st.success(f"Found {len(papers)} papers!")
                             for paper in papers:
@@ -637,8 +893,13 @@ with tab2:
                         st.error(f"Error: {e}")
     
     elif search_type == "Year":
-        year = st.number_input("Enter year:", min_value=1900, max_value=2025, value=2024)
+        year = st.number_input("Enter year:", min_value=1900, max_value=CURRENT_YEAR, value=CURRENT_YEAR)
         source_year = st.selectbox("Source", ["Both", "ArXiv", "Semantic Scholar"], key="year_source")
+        semantic_year_query = st.text_input(
+            "Semantic Scholar topic/query for this year",
+            value="machine learning",
+            help="Semantic Scholar requires a query; year is applied as a filter."
+        )
         
         if st.button("🔍 Search", type="primary"):
             with st.spinner(f"Searching papers from {year}..."):
@@ -648,17 +909,43 @@ with tab2:
                     # ArXiv search by year
                     if source_year in ["Both", "ArXiv"]:
                         arxiv_result = search_arxiv_enhanced(
-                            query=f"submittedDate:[{year}01010000 TO {year}12312359]",
+                            query=None,
                             max_results=20,
+                            submitted_date_start=f"{year}01010000",
+                            submitted_date_end=f"{year}12312359",
                             sort_by="submittedDate",
                             sort_order="descending"
                         )
-                        papers.extend(arxiv_result.get("entries", []))
+                        arxiv_error = arxiv_result.get("error")
+                        if arxiv_error:
+                            st.warning(f"ArXiv API issue: {arxiv_error}")
+                        arxiv_entries = arxiv_result.get("entries", [])
+                        papers.extend(arxiv_entries)
+                        st.info(f"📊 ArXiv found {arxiv_result.get('total', 0)} total papers for {year}")
                     
                     # Semantic Scholar search by year
                     if source_year in ["Both", "Semantic Scholar"]:
-                        results = api.search(year=year, limit=20)
-                        papers.extend(results.get("papers", []))
+                        semantic_result = search_papers_enhanced(
+                            query=semantic_year_query.strip() if semantic_year_query.strip() else "machine learning",
+                            limit=20,
+                            year=str(year)
+                        )
+                        semantic_error = semantic_result.get("error")
+                        if semantic_error:
+                            st.warning(f"Semantic Scholar API issue: {semantic_error}")
+                        semantic_papers = semantic_result.get("data", [])
+                        papers.extend(semantic_papers)
+                        st.info(f"📊 Semantic Scholar found {semantic_result.get('total', 0)} total papers for {year}")
+
+                    # Remove duplicates
+                    seen_titles = set()
+                    unique_papers = []
+                    for paper in papers:
+                        title_lower = paper.get("title", "").lower()
+                        if title_lower and title_lower not in seen_titles:
+                            seen_titles.add(title_lower)
+                            unique_papers.append(paper)
+                    papers = unique_papers
                     
                     if papers:
                         st.success(f"Found {len(papers)} papers!")
@@ -739,8 +1026,12 @@ with tab3:
                     if paper.get("pdf_url"):
                         st.link_button("📥 PDF", paper["pdf_url"])
                     if st.button("🗑️ Remove", key=f"remove_{paper.get('paper_id')}"):
-                        # TODO: Implement removal
-                        st.info("Removal feature coming soon")
+                        removed = remove_paper_from_library(paper.get("paper_id", ""))
+                        if removed:
+                            st.success("✅ Paper removed from library")
+                            st.rerun()
+                        else:
+                            st.warning("Paper not found in library")
     else:
         st.info("Your library is empty. Search and add papers to get started!")
 
@@ -958,8 +1249,35 @@ with tab6:
     if upload_method == "PDF File":
         uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
         if uploaded_file:
-            st.info("PDF upload feature - save file and process")
-            # TODO: Implement file upload processing
+            uploaded_file_id = st.text_input(
+                "Paper ID (optional)",
+                placeholder="Leave empty for auto-generate",
+                key="pdf_file_paper_id"
+            )
+            if st.button("📥 Process Uploaded PDF", type="primary"):
+                temp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+                        temp_file.write(uploaded_file.getbuffer())
+                        temp_path = temp_file.name
+
+                    with st.spinner("Processing uploaded PDF..."):
+                        result_id = ingest_pdf_from_file(
+                            temp_path,
+                            paper_id=uploaded_file_id if uploaded_file_id else None,
+                            metadata={
+                                "title": uploaded_file.name.rsplit(".", 1)[0],
+                                "source": "upload"
+                            }
+                        )
+                    st.success(f"✅ Paper processed! ID: {result_id}")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Processing failed: {e}")
+                finally:
+                    if temp_path and os.path.exists(temp_path):
+                        os.remove(temp_path)
     
     elif upload_method == "PDF URL":
         pdf_url = st.text_input("Enter PDF URL:", placeholder="https://arxiv.org/pdf/...")
@@ -1009,6 +1327,7 @@ with tab6:
 # Tab 7: Analysis
 with tab7:
     st.markdown("### 📊 Analysis Tools")
+    st.info("💡 **Citation Network Visualization** is available below! Select 'Citation Graph' from the dropdown to visualize paper relationships.")
     
     analysis_type = st.selectbox("Choose analysis:", [
         "Paper Summaries",
@@ -1086,12 +1405,122 @@ with tab7:
                     st.error(f"Error: {e}")
     
     elif analysis_type == "Citation Graph":
-        st.subheader("🕸️ Citation Graph")
-        st.info("Citation graph visualization - coming soon!")
-        st.write("This feature will visualize paper relationships using network graphs.")
+        st.subheader("🕸️ Citation Network Visualization")
+        st.markdown("Visualize citation relationships between papers in your library")
+        
+        # Get papers from library
+        library = get_library_papers()
+        
+        if not library:
+            st.warning("No papers in library. Add papers first to visualize citation network.")
+        else:
+            # Paper selection
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                paper_options = {f"{p.get('title', 'Unknown')[:60]}... ({p.get('paper_id', '')[:8]})": p.get('paper_id') 
+                                for p in library}
+                selected_papers = st.multiselect(
+                    "Select papers to visualize (select 1-10 papers):",
+                    options=list(paper_options.keys()),
+                    default=list(paper_options.keys())[:min(5, len(paper_options))]
+                )
+            
+            with col2:
+                max_depth = st.slider("Max Depth", 1, 3, 2, help="How many levels of citations to show")
+                max_nodes = st.slider("Max Nodes", 20, 100, 50, help="Maximum papers in graph")
+                layout_type = st.selectbox("Layout", ["spring", "circular", "kamada_kawai"], 
+                                         help="Graph layout algorithm")
+            
+            if selected_papers:
+                paper_ids = [paper_options[p] for p in selected_papers]
+                
+                if st.button("🕸️ Generate Citation Network", type="primary"):
+                    with st.spinner("Building citation network..."):
+                        try:
+                            # Generate visualization
+                            fig = visualize_citation_network(
+                                paper_ids=paper_ids,
+                                max_depth=max_depth,
+                                max_nodes=max_nodes,
+                                layout=layout_type
+                            )
+                            
+                            # Display graph
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            # Build graph for statistics
+                            graph = build_citation_graph(paper_ids, max_depth=max_depth, max_nodes=max_nodes)
+                            
+                            # Show statistics
+                            col1, col2, col3 = st.columns(3)
+                            
+                            with col1:
+                                st.metric("Papers", len(graph.nodes))
+                            with col2:
+                                st.metric("Citations", len(graph.edges))
+                            with col3:
+                                density = nx.density(graph) if len(graph.nodes) > 1 else 0
+                                st.metric("Network Density", f"{density:.3f}")
+                            
+                            # Tabs for additional insights
+                            tab1, tab2, tab3 = st.tabs(["📊 Influential Papers", "👥 Research Communities", "📈 Network Statistics"])
+                            
+                            with tab1:
+                                st.markdown("### Most Influential Papers (PageRank)")
+                                influential = get_influential_papers(graph, top_k=10)
+                                if influential:
+                                    for i, paper in enumerate(influential, 1):
+                                        with st.expander(f"#{i} - {paper['title'][:60]}... (Score: {paper['influence_score']})"):
+                                            st.write(f"**Authors:** {paper.get('authors', 'Unknown')}")
+                                            st.write(f"**Year:** {paper.get('year', 'N/A')}")
+                                            st.write(f"**Influence Score:** {paper['influence_score']}")
+                                            st.write(f"**Citations:** {paper.get('citation_count', 0)}")
+                                else:
+                                    st.info("Not enough data for influence analysis")
+                            
+                            with tab2:
+                                st.markdown("### Research Communities")
+                                communities = get_research_communities(graph)
+                                if communities.get("num_communities", 0) > 0:
+                                    st.success(f"Found {communities['num_communities']} research communities")
+                                    for comm in communities.get("communities", []):
+                                        with st.expander(f"Community {comm['community_id'] + 1} ({comm['size']} papers)"):
+                                            for paper in comm.get("papers", [])[:10]:
+                                                st.write(f"• {paper['title'][:60]}...")
+                                                st.caption(f"Authors: {paper.get('authors', 'Unknown')}")
+                                else:
+                                    st.info("Not enough connections to detect communities")
+                            
+                            with tab3:
+                                st.markdown("### Network Statistics")
+                                stats = get_citation_statistics(graph)
+                                if stats:
+                                    col1, col2 = st.columns(2)
+                                    
+                                    with col1:
+                                        st.write("**Most Cited Papers:**")
+                                        for paper in stats.get("most_cited", [])[:5]:
+                                            st.write(f"• {paper['title'][:50]}... ({paper['in_degree']} citations)")
+                                    
+                                    with col2:
+                                        st.write("**Most Citing Papers:**")
+                                        for paper in stats.get("most_citing", [])[:5]:
+                                            st.write(f"• {paper['title'][:50]}... ({paper['out_degree']} citations)")
+                                    
+                                    st.markdown("---")
+                                    st.write(f"**Average In-Degree:** {stats.get('avg_in_degree', 0):.2f}")
+                                    st.write(f"**Average Out-Degree:** {stats.get('avg_out_degree', 0):.2f}")
+                                    st.write(f"**Network Density:** {stats.get('density', 0):.4f}")
+                                else:
+                                    st.info("No statistics available")
+                            
+                        except Exception as e:
+                            st.error(f"Error generating citation network: {e}")
+                            st.exception(e)
+            else:
+                st.info("Select at least one paper to visualize")
 
 # Footer
 st.divider()
 st.markdown("---")
 st.markdown("**ScholarX** - Research Paper RAG System | Built with Streamlit")
-
