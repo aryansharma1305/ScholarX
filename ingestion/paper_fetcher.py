@@ -7,6 +7,7 @@ from utils.logger import get_logger
 from ingestion.semantic_scholar_enhanced import search_papers_enhanced, paper_autocomplete
 from ingestion.crossref_api import search_crossref
 from ingestion.openalex_api import search_openalex
+from ingestion.core_api import search_core
 
 logger = get_logger(__name__)
 
@@ -115,7 +116,7 @@ def fetch_papers_by_topic(
         List of paper dictionaries with PDF URLs
     """
     max_papers = max_papers or settings.max_papers_per_query
-    sources = sources or ["arxiv", "semantic_scholar", "crossref", "openalex"]
+    sources = sources or ["arxiv", "semantic_scholar", "crossref", "openalex", "core"]
     
     logger.info(f"Fetching papers for topic: {topic} from {sources}")
     
@@ -169,6 +170,21 @@ def fetch_papers_by_topic(
                     logger.info(f"Got {len(openalex_papers)} papers from OpenAlex")
             except Exception as e:
                 logger.warning(f"OpenAlex search failed: {e}")
+
+    # Try CORE
+    if "core" in sources:
+        remaining = max_papers - len(all_papers)
+        if remaining > 0:
+            try:
+                core_result = search_core(query=topic, limit=min(remaining, papers_per_source))
+                core_papers = core_result.get("items", [])
+                if core_result.get("error"):
+                    logger.warning("CORE search issue: %s", core_result.get("error"))
+                if core_papers:
+                    all_papers.extend(core_papers)
+                    logger.info(f"Got {len(core_papers)} papers from CORE")
+            except Exception as e:
+                logger.warning(f"CORE search failed: {e}")
     
     # Remove duplicates (by title similarity)
     unique_papers = []
@@ -181,4 +197,3 @@ def fetch_papers_by_topic(
     
     logger.info(f"Fetched {len(unique_papers)} unique papers for topic: {topic}")
     return unique_papers[:max_papers]
-

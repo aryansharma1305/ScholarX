@@ -9,6 +9,22 @@ logger = get_logger(__name__)
 OPENALEX_BASE_URL = "https://api.openalex.org"
 
 
+def _decode_abstract(abstract_inverted_index: Optional[Dict]) -> str:
+    """Convert OpenAlex abstract_inverted_index into readable text."""
+    if not abstract_inverted_index:
+        return ""
+
+    positioned_words = []
+    for word, positions in abstract_inverted_index.items():
+        if not isinstance(positions, list):
+            continue
+        for position in positions:
+            positioned_words.append((position, word))
+
+    positioned_words.sort(key=lambda item: item[0])
+    return " ".join(word for _, word in positioned_words)
+
+
 def search_openalex(
     query: Optional[str] = None,
     title: Optional[str] = None,
@@ -91,12 +107,14 @@ def search_openalex(
                 for concept in item["concepts"][:5]:  # Top 5
                     concepts.append(concept.get("display_name", ""))
             
+            abstract = item.get("abstract") or _decode_abstract(item.get("abstract_inverted_index"))
+
             results.append({
                 "paper_id": item.get("id", "").split("/")[-1] if item.get("id") else None,
                 "title": item.get("title", "Unknown"),
                 "authors": authors,
                 "authors_string": ", ".join(authors) if authors else "Unknown",
-                "abstract": item.get("abstract", ""),
+                "abstract": abstract,
                 "year": item.get("publication_year"),
                 "pdf_url": pdf_url,
                 "url": item.get("doi") or item.get("id"),
@@ -167,12 +185,14 @@ def get_openalex_work(work_id: str) -> Optional[Dict]:
             for concept in item["concepts"][:5]:
                 concepts.append(concept.get("display_name", ""))
         
+        abstract = item.get("abstract") or _decode_abstract(item.get("abstract_inverted_index"))
+
         return {
             "paper_id": item.get("id", "").split("/")[-1] if item.get("id") else None,
             "title": item.get("title", "Unknown"),
             "authors": authors,
             "authors_string": ", ".join(authors) if authors else "Unknown",
-            "abstract": item.get("abstract", ""),
+            "abstract": abstract,
             "year": item.get("publication_year"),
             "pdf_url": pdf_url,
             "url": item.get("doi") or item.get("id"),
@@ -187,6 +207,5 @@ def get_openalex_work(work_id: str) -> Optional[Dict]:
     except Exception as e:
         logger.error(f"Error fetching OpenAlex work: {e}")
         return None
-
 
 

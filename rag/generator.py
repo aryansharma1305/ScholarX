@@ -1,4 +1,4 @@
-"""RAG answer generation using OpenAI, Ollama, or simple template."""
+"""RAG answer generation using OpenAI, Grok (xAI), Ollama, or simple template."""
 from typing import List, Dict, Any
 from dataclasses import dataclass
 from config.settings import settings
@@ -9,6 +9,7 @@ logger = get_logger(__name__)
 
 # Lazy loading
 _openai_client = None
+_grok_client = None
 
 
 def _get_openai_client():
@@ -18,6 +19,18 @@ def _get_openai_client():
         from config.openai_client import client
         _openai_client = client
     return _openai_client
+
+
+def _get_grok_client():
+    """Lazy load Grok client (OpenAI-compatible, xAI endpoint)."""
+    global _grok_client
+    if _grok_client is None:
+        from openai import OpenAI
+        _grok_client = OpenAI(
+            api_key=settings.grok_api_key,
+            base_url="https://api.x.ai/v1",
+        )
+    return _grok_client
 
 
 @dataclass
@@ -53,6 +66,21 @@ def _generate_with_openai(query: str, context_text: str, system_prompt: str) -> 
         ],
         temperature=0.7,
         max_tokens=1000
+    )
+    return response.choices[0].message.content or "No answer generated"
+
+
+def _generate_with_grok(query: str, context_text: str, system_prompt: str) -> str:
+    """Generate answer using Grok (xAI) — OpenAI-compatible API."""
+    client = _get_grok_client()
+    response = client.chat.completions.create(
+        model=settings.grok_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Context:\n\n{context_text}\n\nQuestion: {query}\n\nAnswer:"}
+        ],
+        temperature=0.7,
+        max_tokens=1024
     )
     return response.choices[0].message.content or "No answer generated"
 
@@ -137,7 +165,15 @@ def generate_answer(
     
     answer = None
     
-    if settings.llm_provider == "openai":
+    if settings.llm_provider == "grok":
+        try:
+            answer = _generate_with_grok(query, context_text, system_prompt)
+        except Exception as e:
+            logger.error(f"Grok generation failed: {e}")
+            logger.info("Falling back to simple template")
+            answer = _generate_simple_answer(query, context_chunks)
+
+    elif settings.llm_provider == "openai":
         try:
             answer = _generate_with_openai(query, context_text, system_prompt)
         except Exception as e:

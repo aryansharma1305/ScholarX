@@ -6,6 +6,7 @@ from rag.query_expander import expand_query_with_llm, normalize_query
 from rag.hybrid_search import hybrid_search
 from rag.reranker import rerank_results, ensure_diversity
 from rag.quality_scorer import enhance_paper_metadata
+from rag.citation_graph_retriever import apply_citation_boost
 from ingestion.paper_fetcher import fetch_papers_by_topic
 from ingestion.ingest_pipeline import ingest_pdf_from_url
 from config.settings import settings
@@ -15,13 +16,49 @@ from utils.timers import timer
 logger = get_logger(__name__)
 
 
+def _log_stage_diagnostics(chunks: List, stage: str) -> None:
+    """
+    Emit per-stage score distribution logs for ablation study analysis.
+    Produces concrete numbers suitable for inclusion in a paper:
+      - count of citation-boosted vs unboosted chunks
+      - average overlap fraction among boosted chunks
+      - score delta: boosted avg vs unboosted avg
+    """
+    boosted = [c for c in chunks if c.metadata.get("citation_boost", 0) > 0]
+    unboosted = [c for c in chunks if c.metadata.get("citation_boost", 0) == 0]
+    avg = lambda lst: sum(c.score for c in lst) / len(lst) if lst else 0.0
+
+    logger.info(
+        "[Stage: %s] %d/%d chunks citation-boosted",
+        stage, len(boosted), len(chunks),
+    )
+    if boosted:
+        avg_overlap = sum(
+            c.metadata.get("citation_overlap_fraction", 0) for c in boosted
+        ) / len(boosted)
+        hop_dist = {}
+        for c in boosted:
+            hop = c.metadata.get("citation_hop", "?") 
+            hop_dist[hop] = hop_dist.get(hop, 0) + 1
+        logger.info(
+            "[Stage: %s] avg overlap fraction: %.3f | hop distribution: %s",
+            stage, avg_overlap, hop_dist,
+        )
+    logger.info(
+        "[Stage: %s] score delta (boosted=%.4f vs unboosted=%.4f, Δ=%.4f)",
+        stage, avg(boosted), avg(unboosted), avg(boosted) - avg(unboosted),
+    )
+
+
 def run_rag_pipeline(
     query: str,
     top_k: int = 5,
     system_prompt: Optional[str] = None,
     fetch_papers: bool = True,
     use_hybrid_search: bool = True,
-    use_reranking: bool = True
+    use_reranking: bool = True,
+    use_citation_boost: bool = True,
+    debug_mode: bool = False,
 ) -> RAGResponse:
     """
     Run the complete enhanced RAG pipeline.
@@ -33,6 +70,8 @@ def run_rag_pipeline(
         fetch_papers: Whether to fetch papers on-demand if needed
         use_hybrid_search: Whether to use hybrid search
         use_reranking: Whether to re-rank results
+        use_citation_boost: Whether to apply citation-graph-aware score boosting
+        debug_mode: If True, emit per-stage score distribution logs for ablation analysis
         
     Returns:
         RAGResponse with answer, citations, and context
@@ -110,7 +149,16 @@ def run_rag_pipeline(
         # Ensure diversity (max 2 chunks per paper)
         context_chunks = ensure_diversity(context_chunks, max_per_paper=2)
     
-    # Step 5: Take top_k after re-ranking
+    # Step 4b: Citation-graph-aware score boosting
+    if use_citation_boost and settings.citation_boost_weight > 0:
+        with timer("Citation Graph Boost"):
+            context_chunks = apply_citation_boost(context_chunks)
+
+    # Step 4c: Stage-level diagnostic logging (ablation study support)
+    if debug_mode:
+        _log_stage_diagnostics(context_chunks, stage="post-citation-boost")
+
+    # Step 5: Take top_k after re-ranking + citation boost
     context_chunks = context_chunks[:top_k]
     
     # Step 6: Generate answer using retrieved context

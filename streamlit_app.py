@@ -32,9 +32,17 @@ from ingestion.semantic_scholar_enhanced import (
 )
 from ingestion.crossref_api import search_crossref
 from ingestion.openalex_api import search_openalex
+from ingestion.core_api import search_core
 from config.settings import settings
 from config.chroma_client import get_collection
 from api.relevance_ranking import rank_papers_by_relevance, get_relevance_category
+from api.literature_review_search import (
+    add_quality_labels,
+    deduplicate_papers,
+    review_papers_to_dataframe,
+    review_papers_to_markdown,
+    search_literature_review,
+)
 from api.visualization import (
     visualize_citation_network, 
     get_influential_papers, 
@@ -66,6 +74,13 @@ if 'library_papers' not in st.session_state:
     st.session_state.library_papers = []
 if 'processing_tasks' not in st.session_state:
     st.session_state.processing_tasks = {}
+if 'search_results' not in st.session_state:
+    st.session_state.search_results = []
+if 'search_results_query' not in st.session_state:
+    st.session_state.search_results_query = ""
+if 'review_search_meta' not in st.session_state:
+    st.session_state.review_search_meta = {}
+
 
 # Custom CSS
 st.markdown("""
@@ -114,13 +129,22 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-def get_library_papers():
-    """Get all papers in the library."""
+def get_library_papers(force_refresh: bool = False):
+    """Get all papers in the library (cached in session_state to avoid per-card DB calls)."""
+    cache_key = "_library_papers_cache"
+    if not force_refresh and cache_key in st.session_state:
+        return st.session_state[cache_key]
     try:
         collection = get_collection()
         all_data = collection.get(limit=10000)
-        
+
         papers = {}
+        # Count chunks directly from the single all_data fetch
+        chunk_counts: Dict[str, int] = {}
+        for metadata in all_data.get("metadatas", []):
+            pid = metadata.get("paper_id", "unknown")
+            chunk_counts[pid] = chunk_counts.get(pid, 0) + 1
+
         for metadata in all_data.get("metadatas", []):
             paper_id = metadata.get("paper_id", "unknown")
             if paper_id not in papers:
@@ -133,16 +157,12 @@ def get_library_papers():
                     "source": metadata.get("source", "unknown"),
                     "pdf_url": metadata.get("pdf_url", ""),
                     "processed": True,
-                    "chunk_count": 0
+                    "chunk_count": chunk_counts.get(paper_id, 0)
                 }
-        
-        # Count chunks per paper
-        for paper_id in papers:
-            chunks = collection.get(where={"paper_id": paper_id}, limit=1)
-            if chunks.get("ids"):
-                papers[paper_id]["chunk_count"] = len(chunks["ids"])
-        
-        return list(papers.values())
+
+        result = list(papers.values())
+        st.session_state[cache_key] = result
+        return result
     except Exception as e:
         st.error(f"Error loading library: {e}")
         return []
@@ -157,6 +177,8 @@ def remove_paper_from_library(paper_id: str) -> bool:
         if not chunk_ids:
             return False
         collection.delete(ids=chunk_ids)
+        # Invalidate library cache after removal
+        st.session_state.pop("_library_papers_cache", None)
         return True
     except Exception as e:
         st.error(f"Error removing paper {paper_id}: {e}")
@@ -231,6 +253,7 @@ def display_paper_card_with_ranking(paper: Dict, query: str = "", rank: int = 0,
                 return {"category": "Poor Match", "color": "#dc3545", "emoji": "🔴", "badge": "danger"}
     
     source = paper.get("source", "unknown")
+    sources = paper.get("sources") if isinstance(paper.get("sources"), list) else []
     
     # Get relevance info
     relevance_score = paper.get("relevance_score", 0.0)
@@ -254,7 +277,10 @@ def display_paper_card_with_ranking(paper: Dict, query: str = "", rank: int = 0,
         st.markdown(f"**Year:** {paper.get('year', 'N/A')}")
     with col2:
         # Source badge
-        st.markdown(f"**Source:** {source.upper()}")
+        source_label = ", ".join(str(item).upper() for item in sources) if sources else str(source).upper()
+        st.markdown(f"**Source:** {source_label}")
+        if paper.get("citation_count") is not None:
+            st.markdown(f"**Citations:** {paper.get('citation_count', 0)}")
     
     # Show relevance progress bar
     if relevance_info and query:
@@ -271,6 +297,30 @@ def display_paper_card_with_ranking(paper: Dict, query: str = "", rank: int = 0,
                     st.metric("Keyword", f"{breakdown.get('keyword', 0) * 100:.1f}%")
                 with col3:
                     st.metric("Title Match", f"{breakdown.get('title_match', 0) * 100:.1f}%")
+
+    if paper.get("quality_label"):
+        quality_label = paper.get("quality_label")
+        review_percent = paper.get("review_percent")
+        quality_text = f"**Quality:** {quality_label}"
+        if review_percent:
+            quality_text += f" ({review_percent})"
+        st.markdown(quality_text)
+        reasons = paper.get("quality_reasons") or []
+        if reasons:
+            st.caption("Why: " + "; ".join(str(reason) for reason in reasons))
+        if paper.get("review_score") is not None:
+            try:
+                st.progress(float(paper.get("review_score", 0.0)), text=f"Review readiness: {review_percent}")
+            except (TypeError, ValueError):
+                pass
+        if paper.get("review_breakdown"):
+            with st.expander("Review Quality Breakdown", expanded=False):
+                breakdown = paper["review_breakdown"]
+                cols = st.columns(4)
+                cols[0].metric("Topic", f"{breakdown.get('topic', 0) * 100:.0f}%")
+                cols[1].metric("Citations", f"{breakdown.get('citations', 0) * 100:.0f}%")
+                cols[2].metric("Recency", f"{breakdown.get('recency', 0) * 100:.0f}%")
+                cols[3].metric("Review Signal", f"{breakdown.get('review_signal', 0) * 100:.0f}%")
     
     if paper.get("abstract"):
         with st.expander("📄 Abstract"):
@@ -287,31 +337,34 @@ def display_paper_card_with_ranking(paper: Dict, query: str = "", rank: int = 0,
             st.info("📄 No PDF available")
     with col2:
         if show_add_button:
-            # Check if paper is already in library
+            # Use cached library data (not a fresh DB call per card)
             paper_id = str(paper.get("paper_id") or "")
             paper_title = str(paper.get("title") or "").strip().lower()
-            library = get_library_papers()
-            is_in_library = any(
-                (paper_id and str(p.get("paper_id") or "") == paper_id)
-                or (paper_title and str(p.get("title") or "").strip().lower() == paper_title)
-                for p in library
+            library = get_library_papers()  # uses session_state cache
+            lib_ids = {str(p.get("paper_id") or "") for p in library}
+            lib_titles = {str(p.get("title") or "").strip().lower() for p in library}
+            is_in_library = (
+                (paper_id and paper_id in lib_ids)
+                or (paper_title and paper_title in lib_titles)
             )
-            
-            # Check if PDF URL is available
+
+            # Check if PDF URL is available (use _resolve_pdf_url, not just pdf_url field)
             has_pdf = bool(pdf_url)
-            
+
             if is_in_library:
                 st.success("✅ Already in Library")
             elif has_pdf:
                 if st.button("➕ Add to Library", key=f"add_card_{widget_id}", type="primary"):
+                    # Invalidate cache before processing so updated state is shown
+                    st.session_state.pop("_library_papers_cache", None)
                     process_paper_for_rag(paper)
             else:
-                st.warning("⚠️ No PDF URL")
+                st.warning("⚠️ No PDF — cannot add to library")
     with col3:
         if st.button("📊 View Details", key=f"view_card_{widget_id}"):
             st.session_state[f"view_paper_{widget_id}"] = paper
             st.rerun()
-    
+
     st.divider()
 
 
@@ -428,15 +481,17 @@ def process_paper_for_rag(paper: Dict):
         progress_bar.progress(100)
         
         st.session_state.processing_tasks[task_id]["status"] = "completed"
-        
+        # Invalidate library cache so the card immediately shows "Already in Library"
+        st.session_state.pop("_library_papers_cache", None)
+
         # Clear status messages
         status_container.empty()
         status_text.empty()
         progress_bar.empty()
-        
+
         # Show success message
         st.success(f"✅ **Paper added to library successfully!**\n\n**Title:** {paper.get('title', 'Unknown')}\n**ID:** {paper_id}")
-        time.sleep(2)
+        time.sleep(1)
         st.rerun()
             
     except Exception as e:
@@ -540,14 +595,27 @@ with tab2:
     st.markdown("### 🔍 Search Research Papers")
     st.markdown("Search across ArXiv, Semantic Scholar, and more")
     
-    search_type = st.radio("Search by:", ["Keywords", "Author", "Year", "Field"], horizontal=True)
+    search_type = st.radio(
+        "Search by:",
+        ["Keywords", "Literature Review", "Author", "Year", "Field"],
+        horizontal=True,
+        key="search_type_radio"
+    )
+
+    # Clear stale results when the user switches search modes
+    if st.session_state.get("_last_search_type") != search_type:
+        st.session_state["_last_search_type"] = search_type
+        st.session_state["search_results"] = []
+        st.session_state["search_results_query"] = ""
+        st.session_state["review_search_meta"] = {}
+
     
     if search_type == "Keywords":
         col1, col2 = st.columns([3, 1])
         with col1:
             query = st.text_input("Enter search query:", placeholder="e.g., transformer architecture, attention mechanism", key="search_query")
         with col2:
-            source = st.selectbox("Source", ["Both", "ArXiv", "Semantic Scholar", "Crossref", "OpenAlex", "All Sources"])
+            source = st.selectbox("Source", ["Both", "ArXiv", "Semantic Scholar", "Crossref", "OpenAlex", "CORE", "All Sources"])
         
         # ArXiv query builder helper
         if source in ["Both", "ArXiv", "All Sources"]:
@@ -559,10 +627,16 @@ with tab2:
                 st.markdown("**Examples:**")
                 st.code("au:Einstein AND ti:relativity\ncat:cs.AI AND abs:neural\nall:transformer ANDNOT cat:math")
                 
-                use_advanced = st.checkbox("Use advanced query syntax", False)
+                use_advanced = st.checkbox("Use advanced query syntax", False, key="use_advanced_query")
                 if use_advanced:
-                    query = st.text_area("Enter ArXiv query:", value=query, key="advanced_query")
-                    st.caption("💡 You can use field prefixes and Boolean operators directly")
+                    # Use same key as main text_input so they stay in sync (no accumulation)
+                    query = st.text_area(
+                        "Enter ArXiv query (advanced):",
+                        value=st.session_state.get("search_query", ""),
+                        key="search_query",
+                        height=80
+                    )
+                    st.caption("💡 You can use field prefixes (ti:, au:, abs:) and Boolean operators (AND, OR, ANDNOT)")
         
         # Enhanced filters
         with st.expander("🔧 Advanced Filters"):
@@ -575,7 +649,7 @@ with tab2:
                     key="arxiv_field"
                 )
                 arxiv_category = st.text_input("ArXiv Category (e.g., cs.AI, math.CO)", placeholder="Optional")
-                sort_by = st.selectbox("Sort by", ["relevance", "lastUpdatedDate", "submittedDate"], key="sort_by")
+                arxiv_sort_by = st.selectbox("Sort by", ["relevance", "lastUpdatedDate", "submittedDate"], key="arxiv_sort_by")
             
             with col2:
                 # Semantic Scholar filters
@@ -616,36 +690,26 @@ with tab2:
                 except Exception:
                     pass
         
-        if st.button("🔍 Search", type="primary"):
+        if st.button("🔍 Search", type="primary", key="main_search_btn"):
             if query:
                 with st.spinner("Searching papers..."):
                     try:
                         papers = []
-                        
+
                         # Enhanced ArXiv search
                         if source in ["Both", "ArXiv", "All Sources"]:
                             try:
-                                # Determine field
                                 field_map = {
-                                    "all": None,
-                                    "ti (title)": "ti",
-                                    "au (author)": "au",
-                                    "abs (abstract)": "abs",
-                                    "cat (category)": "cat"
+                                    "all": None, "ti (title)": "ti", "au (author)": "au",
+                                    "abs (abstract)": "abs", "cat (category)": "cat"
                                 }
                                 arxiv_field_value = field_map.get(arxiv_field, None)
-                                
-                                # Build query
-                                arxiv_query = query
-                                if arxiv_category:
-                                    arxiv_query = f"{arxiv_query} AND cat:{arxiv_category}"
-                                
+                                arxiv_query = query.strip()  # strip to avoid whitespace accumulation
+                                if arxiv_category and arxiv_category.strip():
+                                    arxiv_query = f"{arxiv_query} AND cat:{arxiv_category.strip()}"
                                 arxiv_result = search_arxiv_enhanced(
-                                    query=arxiv_query,
-                                    max_results=max_results,
-                                    field=arxiv_field_value,
-                                    sort_by=sort_by,
-                                    sort_order="descending"
+                                    query=arxiv_query, max_results=max_results,
+                                    field=arxiv_field_value, sort_by=arxiv_sort_by, sort_order="descending"
                                 )
                                 arxiv_error = arxiv_result.get("error")
                                 if arxiv_error:
@@ -654,21 +718,17 @@ with tab2:
                                 if arxiv_error and not arxiv_papers:
                                     arxiv_papers = search_arxiv(query, max_results=max_results)
                                 papers.extend(arxiv_papers)
-                                
                                 if arxiv_result.get("total", 0) > 0:
                                     st.info(f"📊 ArXiv found {arxiv_result.get('total', 0)} total papers")
                             except Exception as e:
                                 st.warning(f"ArXiv search failed: {e}")
-                                # Fallback to simple search
-                                arxiv_papers = search_arxiv(query, max_results=max_results)
-                                papers.extend(arxiv_papers)
-                        
+                                papers.extend(search_arxiv(query, max_results=max_results))
+
                         # Enhanced Semantic Scholar search
                         if source in ["Both", "Semantic Scholar", "All Sources"]:
                             try:
                                 semantic_result = search_papers_enhanced(
-                                    query=query,
-                                    limit=max_results,
+                                    query=query, limit=max_results,
                                     year=year_range if year_range else None,
                                     fields_of_study=fields_of_study if fields_of_study else None,
                                     open_access_only=open_access_only,
@@ -677,94 +737,257 @@ with tab2:
                                 semantic_error = semantic_result.get("error")
                                 if semantic_error:
                                     st.warning(f"Semantic Scholar API issue: {semantic_error}")
-                                semantic_papers = semantic_result.get("data", [])
-                                papers.extend(semantic_papers)
-                                
+                                papers.extend(semantic_result.get("data", []))
                                 if semantic_result.get("total", 0) > 0:
                                     st.info(f"📊 Semantic Scholar found {semantic_result.get('total', 0)} total papers")
                             except Exception as e:
                                 st.warning(f"Semantic Scholar search failed: {e}")
-                        
+
                         # Crossref search
                         if source in ["Crossref", "All Sources"]:
                             try:
-                                crossref_result = search_crossref(
-                                    query=query,
-                                    rows=min(max_results, 100)  # Crossref max is 1000, but we limit
-                                )
+                                crossref_result = search_crossref(query=query, rows=min(max_results, 100))
                                 crossref_papers = crossref_result.get("items", [])
                                 if crossref_papers:
                                     papers.extend(crossref_papers)
                                     st.info(f"📊 Crossref found {crossref_result.get('total', 0)} total papers")
                             except Exception as e:
                                 st.warning(f"Crossref search failed: {e}")
-                        
+
                         # OpenAlex search
                         if source in ["OpenAlex", "All Sources"]:
                             try:
-                                openalex_result = search_openalex(
-                                    query=query,
-                                    per_page=min(max_results, 200)  # OpenAlex max is 200
-                                )
+                                openalex_result = search_openalex(query=query, per_page=min(max_results, 200))
                                 openalex_papers = openalex_result.get("items", [])
                                 if openalex_papers:
                                     papers.extend(openalex_papers)
                                     st.info(f"📊 OpenAlex found {openalex_result.get('total', 0)} total papers")
                             except Exception as e:
                                 st.warning(f"OpenAlex search failed: {e}")
-                        
+
+                        # CORE search
+                        if source in ["CORE", "All Sources"]:
+                            try:
+                                core_result = search_core(query=query, limit=min(max_results, 100))
+                                core_error = core_result.get("error")
+                                if core_error:
+                                    st.warning(f"CORE API issue: {core_error}")
+                                core_papers = core_result.get("items", [])
+                                if core_papers:
+                                    papers.extend(core_papers)
+                                    st.info(f"📊 CORE found {core_result.get('total', 0)} total papers")
+                            except Exception as e:
+                                st.warning(f"CORE search failed: {e}")
+
                         # Filter by year
                         if year_filter:
                             papers = [p for p in papers if p.get("year") == year_filter]
-                        
-                        # Filter PDF only
+
+                        # Filter PDF only — use _resolve_pdf_url which handles all URL fields
                         if pdf_only:
-                            papers = [p for p in papers if p.get("pdf_url")]
-                        
-                        # Remove duplicates
-                        seen_titles = set()
-                        unique_papers = []
-                        for paper in papers:
-                            title_lower = paper.get("title", "").lower()
-                            if title_lower not in seen_titles:
-                                seen_titles.add(title_lower)
-                                unique_papers.append(paper)
-                        
-                        # Rank papers by relevance to query
+                            papers = [p for p in papers if _resolve_pdf_url(p)]
+
+                        # Remove duplicates across DOI/title/source records
+                        unique_papers = deduplicate_papers(papers)
+
+                        # Rank papers by relevance
                         if query and unique_papers:
                             unique_papers = rank_papers_by_relevance(
-                                query=query,
-                                papers=unique_papers,
-                                use_semantic=True,
-                                use_keyword=True
+                                query=query, papers=unique_papers,
+                                use_semantic=True, use_keyword=True
                             )
-                        
-                        if unique_papers:
-                            st.success(f"Found {len(unique_papers)} unique papers! (Ranked by relevance)")
-                            
-                            # Show sorting option
-                            col1, col2 = st.columns([3, 1])
-                            with col2:
-                                sort_by = st.selectbox("Sort by", ["Relevance (Best Match)", "Year (newest)", "Year (oldest)", "Citations"], key="sort_results")
-                            
-                            # Sort papers
-                            if sort_by == "Year (newest)":
-                                unique_papers.sort(key=lambda x: x.get("year") or 0, reverse=True)
-                            elif sort_by == "Year (oldest)":
-                                unique_papers.sort(key=lambda x: x.get("year") or 0)
-                            elif sort_by == "Citations":
-                                unique_papers.sort(key=lambda x: x.get("citation_count", 0), reverse=True)
-                            # Default: Relevance (already sorted)
-                            
-                            for i, paper in enumerate(unique_papers, 1):
-                                # Display with relevance score
-                                display_paper_card_with_ranking(paper, query=query, rank=i)
-                        else:
-                            st.warning("No papers found. Try different keywords.")
+                            unique_papers = add_quality_labels(query, unique_papers)
+
+                        # ✅ KEY FIX: persist results in session_state so they survive reruns
+                        st.session_state["search_results"] = unique_papers
+                        st.session_state["search_results_query"] = query
+
                     except Exception as e:
                         st.error(f"Search error: {e}")
                         st.exception(e)
+
+        # ✅ Display results from session_state (persists across button-click reruns)
+        if st.session_state.get("search_results"):
+            unique_papers = st.session_state["search_results"]
+            saved_query = st.session_state.get("search_results_query", "")
+
+            col_info, col_sort, col_clear = st.columns([3, 2, 1])
+            with col_info:
+                st.success(f"Found {len(unique_papers)} unique papers! (Ranked by relevance)")
+            with col_sort:
+                sort_results_by = st.selectbox(
+                    "Sort by",
+                    ["Relevance (Best Match)", "Year (newest)", "Year (oldest)", "Citations"],
+                    key="sort_results"
+                )
+            with col_clear:
+                if st.button("🗑️ Clear", key="clear_search_results"):
+                    st.session_state.pop("search_results", None)
+                    st.session_state.pop("search_results_query", None)
+                    st.rerun()
+
+            # Sort a copy so session_state order is preserved
+            display_papers = list(unique_papers)
+            if sort_results_by == "Year (newest)":
+                display_papers.sort(key=lambda x: x.get("year") or 0, reverse=True)
+            elif sort_results_by == "Year (oldest)":
+                display_papers.sort(key=lambda x: x.get("year") or 0)
+            elif sort_results_by == "Citations":
+                display_papers.sort(key=lambda x: x.get("citation_count", 0), reverse=True)
+
+            for i, paper in enumerate(display_papers, 1):
+                display_paper_card_with_ranking(paper, query=saved_query, rank=i)
+
     
+    elif search_type == "Literature Review":
+        st.markdown("### Literature Review Search")
+        st.caption("Expands your topic into review/survey-style queries, searches ArXiv, Semantic Scholar, Crossref, OpenAlex, and CORE, then deduplicates and ranks papers for review usefulness.")
+
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            review_query = st.text_input(
+                "Enter review topic:",
+                placeholder="e.g., retrieval augmented generation evaluation, federated learning privacy",
+                key="review_query"
+            )
+        with col2:
+            review_field = st.text_input("Field/domain (optional)", placeholder="e.g., Computer Science")
+
+        with st.expander("Review Search Controls", expanded=True):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                use_year_window = st.checkbox("Limit publication years", value=False)
+                if use_year_window:
+                    review_year_start = st.number_input(
+                        "From year",
+                        min_value=1900,
+                        max_value=CURRENT_YEAR,
+                        value=max(1900, CURRENT_YEAR - 6),
+                        key="review_year_start"
+                    )
+                    review_year_end = st.number_input(
+                        "To year",
+                        min_value=1900,
+                        max_value=CURRENT_YEAR,
+                        value=CURRENT_YEAR,
+                        key="review_year_end"
+                    )
+                else:
+                    review_year_start = None
+                    review_year_end = None
+            with col2:
+                review_min_citations = st.number_input(
+                    "Minimum citations",
+                    min_value=0,
+                    value=0,
+                    step=5,
+                    key="review_min_citations"
+                )
+                review_pdf_only = st.checkbox("PDF available only", value=False, key="review_pdf_only")
+            with col3:
+                review_max_results = st.slider("Review candidates", 10, 75, 30, key="review_max_results")
+                review_expansion_depth = st.slider("Query expansion depth", 1, 8, 5, key="review_expansion_depth")
+
+        if st.button("Build Review Paper List", type="primary", key="review_search_btn"):
+            if review_query.strip():
+                with st.spinner("Searching review candidates across ArXiv, Semantic Scholar, Crossref, OpenAlex, and CORE..."):
+                    result = search_literature_review(
+                        review_query.strip(),
+                        field=review_field.strip() if review_field.strip() else None,
+                        max_results=review_max_results,
+                        year_start=review_year_start,
+                        year_end=review_year_end,
+                        min_citations=review_min_citations,
+                        pdf_only=review_pdf_only,
+                        max_expanded_queries=review_expansion_depth,
+                    )
+                    st.session_state["search_results"] = result.get("papers", [])
+                    st.session_state["search_results_query"] = review_query.strip()
+                    st.session_state["review_search_meta"] = result
+            else:
+                st.warning("Enter a review topic first.")
+
+        review_results = st.session_state.get("search_results", [])
+        review_meta = st.session_state.get("review_search_meta", {})
+
+        if review_meta:
+            warnings = review_meta.get("warnings", [])
+            source_counts = review_meta.get("source_counts", {})
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Raw source results", review_meta.get("total_before_dedup", 0))
+            col2.metric("After dedupe", review_meta.get("total_after_dedup", 0))
+            col3.metric("Review candidates", len(review_results))
+
+            if source_counts:
+                st.caption(
+                    "Sources: "
+                    + ", ".join(f"{source}: {count}" for source, count in sorted(source_counts.items()))
+                )
+            if review_meta.get("expanded_queries"):
+                with st.expander("Expanded Queries Used", expanded=False):
+                    for expanded_query in review_meta["expanded_queries"]:
+                        st.write(f"- {expanded_query}")
+            if warnings:
+                with st.expander("API Warnings", expanded=True):
+                    for warning in warnings:
+                        st.warning(warning)
+                    if any("429" in warning or "rate limited" in warning.lower() for warning in warnings):
+                        st.info("Semantic Scholar is stricter without an API key. Add SEMANTIC_SCHOLAR_API_KEY in .env and restart Streamlit for higher quota.")
+
+        if review_results:
+            col_info, col_sort, col_clear = st.columns([3, 2, 1])
+            with col_info:
+                st.success(f"Prepared {len(review_results)} review candidates.")
+            with col_sort:
+                review_sort = st.selectbox(
+                    "Sort review list by",
+                    ["Review Score", "Citations", "Year (newest)", "Title"],
+                    key="review_sort_results"
+                )
+            with col_clear:
+                if st.button("Clear", key="clear_review_results"):
+                    st.session_state["search_results"] = []
+                    st.session_state["search_results_query"] = ""
+                    st.session_state["review_search_meta"] = {}
+                    st.rerun()
+
+            display_papers = list(review_results)
+            if review_sort == "Citations":
+                display_papers.sort(key=lambda item: item.get("citation_count", 0), reverse=True)
+            elif review_sort == "Year (newest)":
+                display_papers.sort(key=lambda item: item.get("year") or 0, reverse=True)
+            elif review_sort == "Title":
+                display_papers.sort(key=lambda item: item.get("title", ""))
+            else:
+                display_papers.sort(key=lambda item: item.get("review_score", 0.0), reverse=True)
+
+            export_df = review_papers_to_dataframe(display_papers)
+            export_slug = re.sub(r"[^a-z0-9]+", "_", st.session_state.get("search_results_query", "review").lower()).strip("_") or "review"
+            col_csv, col_md = st.columns(2)
+            with col_csv:
+                st.download_button(
+                    "Export Review List CSV",
+                    data=export_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"{export_slug}_review_papers.csv",
+                    mime="text/csv",
+                    key="review_csv_export"
+                )
+            with col_md:
+                st.download_button(
+                    "Export Review List Markdown",
+                    data=review_papers_to_markdown(display_papers).encode("utf-8"),
+                    file_name=f"{export_slug}_review_papers.md",
+                    mime="text/markdown",
+                    key="review_md_export"
+                )
+
+            saved_query = st.session_state.get("search_results_query", "")
+            for index, paper in enumerate(display_papers, 1):
+                display_paper_card_with_ranking(paper, query=saved_query, rank=index)
+        elif review_meta:
+            st.warning("No review candidates matched the filters. Try removing PDF-only/min-citation filters or reducing the year restriction.")
+
+
     elif search_type == "Author":
         author = st.text_input("Enter author name:", placeholder="e.g., Geoffrey Hinton")
         source_author = st.selectbox("Source", ["Both", "ArXiv", "Semantic Scholar"], key="author_source")

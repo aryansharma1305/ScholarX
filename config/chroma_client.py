@@ -1,16 +1,7 @@
-"""ChromaDB client configuration."""
+"""ChromaDB client configuration (chromadb >= 1.x, NumPy 2.x compatible)."""
 import shutil
 from datetime import datetime
 from pathlib import Path
-
-import numpy as np
-
-# ChromaDB 0.4.x still references np.float_, removed in NumPy 2.0.
-# Keep a compatibility alias so imports do not crash.
-if not hasattr(np, "float_"):
-    np.float_ = np.float64  # type: ignore[attr-defined]
-if not hasattr(np, "NaN"):
-    np.NaN = np.nan  # type: ignore[attr-defined]
 
 import chromadb
 from chromadb.api.client import SharedSystemClient
@@ -31,7 +22,13 @@ def _create_client() -> chromadb.PersistentClient:
 
 def _is_schema_mismatch_error(exc: Exception) -> bool:
     """Check whether exception indicates an incompatible persisted Chroma schema."""
-    return "no such column: collections.topic" in str(exc).lower()
+    msg = str(exc).lower()
+    return (
+        "no such column" in msg
+        or "sqlite" in msg
+        or "database schema" in msg
+        or "migration" in msg
+    )
 
 
 def _backup_incompatible_store() -> None:

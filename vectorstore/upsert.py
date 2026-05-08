@@ -41,11 +41,12 @@ def upsert_chunks(
             "end_char": chunk.end_char,
         }
         
-        # Add any additional metadata
+        # Add any additional metadata, sanitizing types for ChromaDB 1.x
         if metadata:
             for key, value in metadata.items():
-                # ChromaDB metadata must be strings, numbers, or bools
-                if isinstance(value, (str, int, float, bool)):
+                if value is None:
+                    continue  # skip None values — ChromaDB 1.x rejects them
+                elif isinstance(value, (str, int, float, bool)):
                     chunk_metadata[key] = value
                 else:
                     chunk_metadata[key] = str(value)

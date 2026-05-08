@@ -27,23 +27,20 @@ class AblationConfig:
         use_hybrid_search: bool = True,
         use_query_expansion: bool = True,
         use_reranking: bool = True,
-        use_on_demand_fetching: bool = True
+        use_on_demand_fetching: bool = True,
+        # Citation boost axes
+        citation_boost_weight: float = 0.0,
+        min_citation_anchor_hits: int = 1,
+        use_2hop_citation: bool = False,
     ):
-        """
-        Initialize ablation configuration.
-        
-        Args:
-            name: Name of configuration
-            use_hybrid_search: Whether to use hybrid search
-            use_query_expansion: Whether to use query expansion
-            use_reranking: Whether to use re-ranking
-            use_on_demand_fetching: Whether to fetch papers on-demand
-        """
         self.name = name
         self.use_hybrid_search = use_hybrid_search
         self.use_query_expansion = use_query_expansion
         self.use_reranking = use_reranking
         self.use_on_demand_fetching = use_on_demand_fetching
+        self.citation_boost_weight = citation_boost_weight
+        self.min_citation_anchor_hits = min_citation_anchor_hits
+        self.use_2hop_citation = use_2hop_citation
     
     def __repr__(self):
         return (
@@ -51,47 +48,74 @@ class AblationConfig:
             f"hybrid={self.use_hybrid_search}, "
             f"expansion={self.use_query_expansion}, "
             f"rerank={self.use_reranking}, "
-            f"fetch={self.use_on_demand_fetching})"
+            f"boost={self.citation_boost_weight}, "
+            f"min_hits={self.min_citation_anchor_hits}, "
+            f"2hop={self.use_2hop_citation})"
         )
 
 
-# Standard ablation configurations
+# Standard ablation configurations (component removal study)
 ABLATION_CONFIGS = [
     AblationConfig(
         name="Full ScholarX",
-        use_hybrid_search=True,
-        use_query_expansion=True,
-        use_reranking=True,
-        use_on_demand_fetching=True
+        use_hybrid_search=True, use_query_expansion=True,
+        use_reranking=True, use_on_demand_fetching=True,
+        citation_boost_weight=0.15,
     ),
     AblationConfig(
-        name="ScholarX - Re-ranking",
-        use_hybrid_search=True,
-        use_query_expansion=True,
-        use_reranking=False,
-        use_on_demand_fetching=True
+        name="ScholarX − Re-ranking",
+        use_hybrid_search=True, use_query_expansion=True,
+        use_reranking=False, use_on_demand_fetching=True,
+        citation_boost_weight=0.15,
     ),
     AblationConfig(
-        name="ScholarX - Hybrid Search",
-        use_hybrid_search=False,
-        use_query_expansion=True,
-        use_reranking=True,
-        use_on_demand_fetching=True
+        name="ScholarX − Hybrid Search",
+        use_hybrid_search=False, use_query_expansion=True,
+        use_reranking=True, use_on_demand_fetching=True,
+        citation_boost_weight=0.15,
     ),
     AblationConfig(
-        name="ScholarX - Query Expansion",
-        use_hybrid_search=True,
-        use_query_expansion=False,
-        use_reranking=True,
-        use_on_demand_fetching=True
+        name="ScholarX − Query Expansion",
+        use_hybrid_search=True, use_query_expansion=False,
+        use_reranking=True, use_on_demand_fetching=True,
+        citation_boost_weight=0.15,
     ),
     AblationConfig(
-        name="ScholarX - All Enhancements",
-        use_hybrid_search=False,
-        use_query_expansion=False,
-        use_reranking=False,
-        use_on_demand_fetching=True
+        name="Semantic Only (baseline)",
+        use_hybrid_search=False, use_query_expansion=False,
+        use_reranking=False, use_on_demand_fetching=False,
+        citation_boost_weight=0.0,
     ),
+]
+
+# Citation-boost ablation sweep (7 rows, 3 independent axes)
+# Run this after ABLATION_CONFIGS to get the full comparison table.
+CITATION_ABLATION_CONFIGS = [
+    # name,                        hybrid rerank  boost  min_hits  2hop
+    AblationConfig("semantic_only",
+        use_hybrid_search=False, use_reranking=False,
+        citation_boost_weight=0.00, min_citation_anchor_hits=1, use_2hop_citation=False),
+    AblationConfig("+ hybrid",
+        use_hybrid_search=True,  use_reranking=False,
+        citation_boost_weight=0.00, min_citation_anchor_hits=1, use_2hop_citation=False),
+    AblationConfig("+ reranker",
+        use_hybrid_search=True,  use_reranking=True,
+        citation_boost_weight=0.00, min_citation_anchor_hits=1, use_2hop_citation=False),
+    AblationConfig("+ citation (w=0.10)",
+        use_hybrid_search=True,  use_reranking=True,
+        citation_boost_weight=0.10, min_citation_anchor_hits=1, use_2hop_citation=False),
+    AblationConfig("+ citation (w=0.15)",
+        use_hybrid_search=True,  use_reranking=True,
+        citation_boost_weight=0.15, min_citation_anchor_hits=1, use_2hop_citation=False),
+    AblationConfig("+ citation (w=0.30)",
+        use_hybrid_search=True,  use_reranking=True,
+        citation_boost_weight=0.30, min_citation_anchor_hits=1, use_2hop_citation=False),
+    AblationConfig("+ citation (min_hits=2)",
+        use_hybrid_search=True,  use_reranking=True,
+        citation_boost_weight=0.15, min_citation_anchor_hits=2, use_2hop_citation=False),
+    AblationConfig("+ citation (2-hop)",
+        use_hybrid_search=True,  use_reranking=True,
+        citation_boost_weight=0.15, min_citation_anchor_hits=1, use_2hop_citation=True),
 ]
 
 
@@ -101,26 +125,46 @@ def run_ablation_retrieval(
     top_k: int = 20
 ) -> List[str]:
     """
-    Run retrieval with specific ablation configuration.
-    
-    Args:
-        config: Ablation configuration
-        query: User query
-        top_k: Number of results to retrieve
-        
-    Returns:
-        List of retrieved paper IDs
+    Run retrieval with a specific ablation configuration.
+    Temporarily patches settings with the config's citation params so the
+    citation_graph_retriever reads the right values without forking the pipeline.
     """
+    import contextlib
+
+    @contextlib.contextmanager
+    def _patch_settings(cfg: AblationConfig):
+        """Temporarily override citation settings for this config."""
+        old_weight = settings.citation_boost_weight
+        old_min   = settings.min_citation_anchor_hits
+        old_2hop  = settings.use_2hop_citation
+        settings.citation_boost_weight   = cfg.citation_boost_weight
+        settings.min_citation_anchor_hits = cfg.min_citation_anchor_hits
+        settings.use_2hop_citation        = cfg.use_2hop_citation
+        try:
+            yield
+        finally:
+            settings.citation_boost_weight   = old_weight
+            settings.min_citation_anchor_hits = old_min
+            settings.use_2hop_citation        = old_2hop
+
     try:
-        if config.use_hybrid_search:
-            results = hybrid_search(query, top_k=top_k)
-        else:
-            results = retrieve_context(query, top_k=top_k)
-        
-        # Note: Re-ranking would be applied here if enabled
-        # For now, we return the results as-is
-        # In full implementation, you'd apply re-ranking if config.use_reranking
-        
+        with _patch_settings(config):
+            use_boost = config.citation_boost_weight > 0
+            if config.use_hybrid_search:
+                results = hybrid_search(query, top_k=top_k)
+            else:
+                results = retrieve_context(query, top_k=top_k)
+
+            if config.use_reranking:
+                from rag.reranker import rerank_results, ensure_diversity
+                paper_ids = list(set(r.paper_id for r in results))
+                results = rerank_results(results, {pid: {} for pid in paper_ids})
+                results = ensure_diversity(results, max_per_paper=2)
+
+            if use_boost:
+                from rag.citation_graph_retriever import apply_citation_boost
+                results = apply_citation_boost(results)
+
         return [r.paper_id for r in results]
     except Exception as e:
         logger.error(f"Error in ablation retrieval for {config.name}: {e}")
@@ -132,31 +176,17 @@ def run_ablation_answer_generation(
     query: str,
     top_k: int = 5
 ) -> str:
-    """
-    Generate answer with specific ablation configuration.
-    
-    Args:
-        config: Ablation configuration
-        query: User query
-        top_k: Number of context chunks
-        
-    Returns:
-        Generated answer
-    """
+    """Generate answer with a specific ablation configuration."""
     try:
-        # Use simple pipeline if all enhancements disabled
-        if not config.use_hybrid_search and not config.use_query_expansion and not config.use_reranking:
-            response = run_simple_rag_pipeline(query, top_k=top_k)
-        else:
-            # Use full pipeline with configuration
-            response = run_rag_pipeline(
-                query=query,
-                top_k=top_k,
-                fetch_papers=config.use_on_demand_fetching,
-                use_hybrid_search=config.use_hybrid_search,
-                use_reranking=config.use_reranking
-            )
-        
+        use_boost = config.citation_boost_weight > 0
+        response = run_rag_pipeline(
+            query=query,
+            top_k=top_k,
+            fetch_papers=config.use_on_demand_fetching,
+            use_hybrid_search=config.use_hybrid_search,
+            use_reranking=config.use_reranking,
+            use_citation_boost=use_boost,
+        )
         return response.answer
     except Exception as e:
         logger.error(f"Error in ablation answer generation for {config.name}: {e}")
@@ -470,6 +500,151 @@ def main():
     print(f"\n✅ Ablation study complete! Results in {args.output}")
 
 
+def run_citation_boost_sweep(
+    queries_with_relevance: List[Dict],
+    output_dir: Optional[Path] = None,
+    top_k: int = 5,
+) -> str:
+    """
+    Run the citation-boost ablation sweep across CITATION_ABLATION_CONFIGS.
+
+    This is the primary function to call to produce the ablation table for
+    the paper.  It iterates over the 8 citation configs, evaluates each on
+    the provided queries, and returns a markdown table.
+
+    Args:
+        queries_with_relevance: List of dicts with keys:
+            - "query": str
+            - "query_id": str
+            - "relevant_papers": List[str]  (ground-truth paper IDs)
+            - "relevance_map": Dict[str, float]  (paper_id -> score, optional)
+        output_dir: If provided, saves results JSON + markdown table here.
+        top_k: Precision@K cutoff.
+
+    Returns:
+        Markdown table string ready to paste into README or paper.
+
+    Example usage::
+
+        from evaluation.ablation_study import run_citation_boost_sweep
+        queries = [
+            {
+                "query_id": "q1",
+                "query": "attention mechanisms in transformers",
+                "relevant_papers": ["paper_a", "paper_b"],
+                "relevance_map": {"paper_a": 2.0, "paper_b": 1.0},
+            },
+            # ... more queries
+        ]
+        table = run_citation_boost_sweep(queries, output_dir=Path("ablation_results"))
+        print(table)
+    """
+    logger.info(
+        "Starting citation boost sweep: %d configs × %d queries",
+        len(CITATION_ABLATION_CONFIGS), len(queries_with_relevance),
+    )
+
+    all_results: Dict[str, Dict] = {}
+
+    for config in CITATION_ABLATION_CONFIGS:
+        logger.info("  → Config: %s", config.name)
+        per_query_metrics = []
+
+        for q in queries_with_relevance:
+            try:
+                retrieved = run_ablation_retrieval(config, q["query"], top_k=top_k * 4)
+                relevant  = q.get("relevant_papers", [])
+                rel_map   = q.get("relevance_map", {})
+
+                qm = calculate_retrieval_metrics(
+                    retrieved=retrieved,
+                    relevant=relevant,
+                    relevance_map=rel_map or None,
+                    k_values=[top_k],
+                )
+                qm["query_id"] = q["query_id"]
+                per_query_metrics.append(qm)
+            except Exception as exc:
+                logger.warning("  Query %s failed for %s: %s", q["query_id"], config.name, exc)
+
+        # Aggregate
+        def _mean(key: str) -> float:
+            vals = [m[key] for m in per_query_metrics if key in m]
+            return sum(vals) / len(vals) if vals else 0.0
+
+        all_results[config.name] = {
+            "config": {
+                "citation_boost_weight":   config.citation_boost_weight,
+                "min_citation_anchor_hits": config.min_citation_anchor_hits,
+                "use_2hop_citation":       config.use_2hop_citation,
+                "use_hybrid_search":       config.use_hybrid_search,
+                "use_reranking":           config.use_reranking,
+            },
+            "metrics": {
+                f"precision@{top_k}": _mean(f"precision@{top_k}"),
+                f"recall@{top_k}":    _mean(f"recall@{top_k}"),
+                f"ndcg@{top_k}":      _mean(f"ndcg@{top_k}"),
+                "mrr":                _mean("mrr"),
+                "map":                _mean("map"),
+            },
+            "per_query": per_query_metrics,
+        }
+
+    # ── Build markdown table ─────────────────────────────────────────────────
+    k = top_k
+    header = (
+        f"| System | Hybrid | Rerank | CitBoost | MinHits | 2-Hop "
+        f"| P@{k} | R@{k} | NDCG@{k} | MRR | MAP |\n"
+        f"|--------|--------|--------|----------|---------|-------"
+        f"|-------|-------|---------|-----|-----|\n"
+    )
+    rows = []
+    for name, data in all_results.items():
+        cfg = data["config"]
+        m   = data["metrics"]
+        rows.append(
+            f"| **{name}** "
+            f"| {'✓' if cfg['use_hybrid_search'] else '✗'} "
+            f"| {'✓' if cfg['use_reranking'] else '✗'} "
+            f"| {cfg['citation_boost_weight']:.2f} "
+            f"| {cfg['min_citation_anchor_hits']} "
+            f"| {'✓' if cfg['use_2hop_citation'] else '✗'} "
+            f"| {m[f'precision@{k}']:.3f} "
+            f"| {m[f'recall@{k}']:.3f} "
+            f"| {m[f'ndcg@{k}']:.3f} "
+            f"| {m['mrr']:.3f} "
+            f"| {m['map']:.3f} |"
+        )
+
+    table = (
+        f"## Citation-Graph Retrieval Ablation Study\n\n"
+        f"Results over {len(queries_with_relevance)} queries · Precision@{k} cutoff\n\n"
+        + header
+        + "\n".join(rows)
+        + "\n"
+    )
+
+    # ── Persist ──────────────────────────────────────────────────────────────
+    if output_dir:
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        results_file = out / "citation_ablation_results.json"
+        table_file   = out / "citation_ablation_table.md"
+        with open(results_file, "w") as f:
+            json.dump({
+                "results": all_results,
+                "timestamp": datetime.now().isoformat(),
+                "num_queries": len(queries_with_relevance),
+                "top_k": top_k,
+            }, f, indent=2)
+        with open(table_file, "w") as f:
+            f.write(table)
+        logger.info("Citation ablation results saved to %s", output_dir)
+
+    return table
+
+
 if __name__ == '__main__':
     main()
+
 

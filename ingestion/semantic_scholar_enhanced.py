@@ -53,7 +53,10 @@ def _request_with_retries(
                 timeout=timeout
             )
 
-            if response.status_code == 429 and attempt < max_retries - 1:
+            if response.status_code == 429:
+                # Without an API key, retrying rarely helps — fail fast so UI isn't blocked
+                if not SEMANTIC_SCHOLAR_API_KEY or attempt >= max_retries - 1:
+                    response.raise_for_status()
                 delay = _retry_delay(response, attempt)
                 logger.warning("Semantic Scholar rate limited, retrying in %.1fs...", delay)
                 time.sleep(delay)

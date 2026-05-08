@@ -426,3 +426,77 @@ def calculate_answer_quality_metrics(
     
     return metrics
 
+
+def run_ragas_eval(
+    questions: List[str],
+    answers: List[str],
+    contexts: List[str],
+    ground_truths: List[str],
+) -> Dict:
+    """
+    Run RAGAS evaluation alongside custom retrieval metrics.
+
+    RAGAS measures generation-quality from the LLM perspective:
+      - faithfulness:       is the answer grounded in the retrieved context?
+      - answer_relevancy:  does the answer address the question?
+      - context_precision: are the retrieved contexts actually useful?
+
+    Running this on the same 20 queries as precision@k gives you two
+    complementary frameworks: retrieval-stage quality (custom) + generation-
+    stage quality (RAGAS).  That's the "stage-level evaluation" framing
+    described in the ScholarX contribution claim.
+
+    Args:
+        questions:     List of query strings.
+        answers:       List of LLM-generated answer strings.
+        contexts:      List of retrieved context strings (one per query,
+                       concatenated from top-k chunks).
+        ground_truths: List of reference answer strings.
+
+    Returns:
+        Dict with RAGAS metric scores and a per-question breakdown.
+
+    Raises:
+        ImportError: If `ragas` or `datasets` are not installed.
+                     Install with: pip install ragas datasets
+    """
+    try:
+        from ragas import evaluate
+        from ragas.metrics import faithfulness, answer_relevancy, context_precision
+        from datasets import Dataset
+    except ImportError as exc:
+        raise ImportError(
+            "RAGAS dependencies missing. Install with: pip install ragas datasets"
+        ) from exc
+
+    if not (len(questions) == len(answers) == len(contexts) == len(ground_truths)):
+        raise ValueError(
+            "All input lists must have the same length. "
+            f"Got: questions={len(questions)}, answers={len(answers)}, "
+            f"contexts={len(contexts)}, ground_truths={len(ground_truths)}"
+        )
+
+    dataset = Dataset.from_dict({
+        "question":     questions,
+        "answer":       answers,
+        "contexts":     [[c] for c in contexts],   # RAGAS expects List[List[str]]
+        "ground_truth": ground_truths,
+    })
+
+    result = evaluate(
+        dataset,
+        metrics=[faithfulness, answer_relevancy, context_precision],
+    )
+
+    # Convert to plain dict for easy JSON serialisation
+    scores = result.to_pandas().to_dict(orient="list")
+    summary = {
+        "faithfulness":      float(result["faithfulness"]),
+        "answer_relevancy":  float(result["answer_relevancy"]),
+        "context_precision": float(result["context_precision"]),
+        "per_question": scores,
+        "num_questions": len(questions),
+    }
+    return summary
+
+
