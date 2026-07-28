@@ -79,7 +79,9 @@ def expand_query_with_llm(query: str) -> List[str]:
     # If using OpenAI and it's available, use it
     if settings.llm_provider == "openai" and settings.openai_api_key:
         try:
-            from config.openai_client import client
+            from config.openai_client import get_openai_client
+
+            client = get_openai_client()
             prompt = f"""Given this research query: "{query}"
 
 Generate 3-5 related search queries that would help find relevant research papers. 
@@ -148,4 +150,3 @@ def normalize_query(query: str) -> str:
             expanded.append(word)
     
     return " ".join(expanded)
-

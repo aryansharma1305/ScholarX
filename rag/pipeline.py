@@ -1,5 +1,5 @@
 """Complete RAG pipeline orchestration with enhanced features."""
-from typing import Optional, Dict, List
+from typing import Callable, Optional, Dict, List
 from rag.retriever import retrieve_context
 from rag.generator import generate_answer, RAGResponse
 from rag.query_expander import expand_query_with_llm, normalize_query
@@ -59,6 +59,10 @@ def run_rag_pipeline(
     use_reranking: bool = True,
     use_citation_boost: bool = True,
     debug_mode: bool = False,
+    selected_paper_ids: Optional[List[str]] = None,
+    thread_id: Optional[str] = None,
+    progress_callback: Optional[Callable[[str, str], None]] = None,
+    use_langgraph: Optional[bool] = None,
 ) -> RAGResponse:
     """
     Run the complete enhanced RAG pipeline.
@@ -72,11 +76,42 @@ def run_rag_pipeline(
         use_reranking: Whether to re-rank results
         use_citation_boost: Whether to apply citation-graph-aware score boosting
         debug_mode: If True, emit per-stage score distribution logs for ablation analysis
+        selected_paper_ids: Restrict retrieval to specific papers
+        thread_id: Persistent LangGraph conversation identifier
+        progress_callback: Receives graph stage name and user-facing status
+        use_langgraph: Override the USE_LANGGRAPH setting for this call
         
     Returns:
         RAGResponse with answer, citations, and context
     """
-    logger.info(f"Running enhanced RAG pipeline for query: {query[:50]}...")
+    effective_langgraph = (
+        settings.use_langgraph if use_langgraph is None else use_langgraph
+    )
+    # Ablation runs require the original explicit stage implementation.
+    if effective_langgraph and not debug_mode:
+        from rag.langgraph_pipeline import run_research_graph
+
+        result = run_research_graph(
+            query=query,
+            top_k=top_k,
+            fetch_papers=fetch_papers,
+            selected_paper_ids=selected_paper_ids,
+            system_prompt=system_prompt,
+            use_hybrid_search=use_hybrid_search,
+            use_reranking=use_reranking,
+            use_citation_boost=use_citation_boost,
+            thread_id=thread_id,
+            progress_callback=progress_callback,
+        )
+        return RAGResponse(
+            query=result["query"],
+            answer=result["answer"],
+            citations=result["citations"],
+            context_chunks=result["context_chunks"],
+            metadata=result.get("workflow", {}),
+        )
+
+    logger.info(f"Running legacy enhanced RAG pipeline for query: {query[:50]}...")
     
     # Step 1: Normalize and expand query
     normalized_query = normalize_query(query)

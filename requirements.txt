@@ -20,3 +20,11 @@ uvicorn>=0.30.0
 # RAGAS evaluation framework (generation quality metrics)
 ragas>=0.1.0
 datasets>=2.14.0
+arxiv>=2.1.0
+
+# LangChain model/retriever interfaces and LangGraph orchestration
+langchain>=1.0.0,<2.0.0
+langchain-openai>=1.0.0,<2.0.0
+langchain-ollama>=1.0.0,<2.0.0
+langgraph>=1.0.0,<2.0.0
+langgraph-checkpoint-sqlite>=3.0.0,<4.0.0

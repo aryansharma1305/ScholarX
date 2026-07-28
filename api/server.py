@@ -22,6 +22,8 @@ class RAGQueryRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=20)
     fetch_papers: bool = False
     use_enhanced: bool = True
+    selected_paper_ids: List[str] = Field(default_factory=list)
+    thread_id: Optional[str] = None
 
 
 @app.get("/health")
@@ -67,7 +69,9 @@ def rag_query(request: RAGQueryRequest) -> dict:
             query=request.query,
             top_k=request.top_k,
             fetch_papers=request.fetch_papers,
-            use_enhanced=request.use_enhanced
+            use_enhanced=request.use_enhanced,
+            selected_paper_ids=request.selected_paper_ids,
+            thread_id=request.thread_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -103,4 +107,3 @@ def get_trends(years: Optional[str] = None) -> dict:
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid years format. Use comma-separated integers.")
     return api.analyze_trends(years=parsed_years)
-

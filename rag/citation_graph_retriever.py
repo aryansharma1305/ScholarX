@@ -15,9 +15,10 @@ Ablation axes exposed via settings / environment:
 from __future__ import annotations
 
 import datetime
+import re
 import time
 from functools import lru_cache
-from typing import Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from config.settings import settings
 from utils.logger import get_logger
@@ -34,6 +35,71 @@ _2HOP_DECAY = 0.5           # 2-hop boost is this fraction of 1-hop boost
 _API_DELAY = 0.15 if settings.semantic_scholar_api_key else 1.05
 
 _CURRENT_YEAR = datetime.datetime.now().year
+_ARXIV_ID = re.compile(r"^(?:arxiv:)?(\d{4}\.\d{4,5})(?:v\d+)?$", re.IGNORECASE)
+_S2_ID = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+
+
+def _arxiv_id(value: Any) -> Optional[str]:
+    """Return a version-free arXiv identifier when the value is recognizable."""
+    match = _ARXIV_ID.match(str(value or "").strip())
+    return match.group(1) if match else None
+
+
+def _paper_aliases(
+    paper_id: Any,
+    metadata: Optional[Dict[str, Any]] = None,
+    external_ids: Optional[Dict[str, Any]] = None,
+) -> Set[str]:
+    """Build identifiers that can be matched across local and Semantic Scholar data."""
+    metadata = metadata or {}
+    external_ids = external_ids or {}
+    aliases: Set[str] = set()
+    raw_id = str(paper_id or "").strip()
+
+    if _S2_ID.match(raw_id):
+        aliases.add(f"s2:{raw_id.lower()}")
+
+    arxiv = _arxiv_id(metadata.get("arxiv_id") or external_ids.get("ArXiv") or raw_id)
+    if arxiv:
+        aliases.add(f"arxiv:{arxiv.lower()}")
+
+    doi = metadata.get("doi") or external_ids.get("DOI")
+    source = str(metadata.get("source") or "").lower()
+    if not doi and (source == "crossref" or raw_id.lower().startswith("doi:")):
+        doi = raw_id.removeprefix("DOI:").removeprefix("doi:")
+    if doi:
+        aliases.add(f"doi:{str(doi).strip().lower()}")
+
+    corpus_id = external_ids.get("CorpusId")
+    if corpus_id is not None:
+        aliases.add(f"corpus:{corpus_id}")
+
+    return aliases
+
+
+def _semantic_scholar_query_id(
+    paper_id: Any,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Convert local metadata into an identifier accepted by the Graph API."""
+    metadata = metadata or {}
+    raw_id = str(paper_id or "").strip()
+    source = str(metadata.get("source") or "").lower()
+
+    arxiv = _arxiv_id(metadata.get("arxiv_id") or raw_id)
+    if arxiv and source in {"", "arxiv", "smoke_test", "smoke_file"}:
+        return f"ARXIV:{arxiv}"
+
+    doi = metadata.get("doi")
+    if not doi and source == "crossref":
+        doi = raw_id
+    if doi:
+        return f"DOI:{str(doi).removeprefix('DOI:').removeprefix('doi:')}"
+
+    if source == "semantic_scholar" or _S2_ID.match(raw_id):
+        return raw_id
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -65,17 +131,23 @@ def _fetch_1hop_uncached(paper_id: str) -> Set[str]:
 
         # Incoming edges (papers that cite this paper)
         for citing in get_paper_citations(paper_id, limit=50).get("data", []):
-            pid = citing.get("paper_id")
-            if pid and pid != paper_id:
-                neighbours.add(pid)
+            neighbours.update(
+                _paper_aliases(
+                    citing.get("paper_id"),
+                    external_ids=citing.get("external_ids"),
+                )
+            )
 
         time.sleep(_API_DELAY)
 
         # Outgoing edges (papers this paper cites)
         for ref in get_paper_references(paper_id, limit=50).get("data", []):
-            pid = ref.get("paper_id")
-            if pid and pid != paper_id:
-                neighbours.add(pid)
+            neighbours.update(
+                _paper_aliases(
+                    ref.get("paper_id"),
+                    external_ids=ref.get("external_ids"),
+                )
+            )
 
         logger.debug("1-hop neighbourhood for %s: %d neighbours", paper_id, len(neighbours))
         return neighbours
@@ -238,11 +310,16 @@ def apply_citation_boost(
     seen: Set[str] = set()
     anchor_ids: List[str] = []
     for chunk in results:
-        if chunk.paper_id not in seen:
-            seen.add(chunk.paper_id)
-            anchor_ids.append(chunk.paper_id)
+        query_id = _semantic_scholar_query_id(chunk.paper_id, chunk.metadata)
+        if query_id and query_id not in seen:
+            seen.add(query_id)
+            anchor_ids.append(query_id)
         if len(anchor_ids) >= top_anchor_k:
             break
+
+    if not anchor_ids:
+        logger.debug("[CitBoost] No supported scholarly identifiers found, skipping.")
+        return results
 
     logger.info(
         "[CitBoost] %d anchor papers → building citation neighbourhood "
@@ -270,7 +347,14 @@ def apply_citation_boost(
     boosted: List[QueryResult] = []
     for chunk in results:
         base_meta = chunk.metadata if chunk.metadata is not None else {}
-        entry = neighbourhood.get(chunk.paper_id)
+        entry = next(
+            (
+                neighbourhood[alias]
+                for alias in _paper_aliases(chunk.paper_id, base_meta)
+                if alias in neighbourhood
+            ),
+            None,
+        )
 
         if entry is not None:
             base_boost, anchor_hit_count, hop_label = entry

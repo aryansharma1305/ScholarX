@@ -47,6 +47,30 @@ class Settings:
     # Retrieval
     default_top_k: int = int(os.getenv("DEFAULT_TOP_K", "5"))
 
+    # LangGraph orchestration
+    use_langgraph: bool = os.getenv("USE_LANGGRAPH", "true").lower() == "true"
+    langgraph_checkpoint_path: str = os.getenv(
+        "LANGGRAPH_CHECKPOINT_PATH",
+        "./.runtime/langgraph_checkpoints.sqlite3"
+    )
+    langgraph_max_external_searches: int = int(
+        os.getenv("LANGGRAPH_MAX_EXTERNAL_SEARCHES", "1")
+    )
+    langgraph_max_answer_retries: int = int(
+        os.getenv("LANGGRAPH_MAX_ANSWER_RETRIES", "1")
+    )
+    langgraph_min_context_chunks: int = int(
+        os.getenv("LANGGRAPH_MIN_CONTEXT_CHUNKS", "3")
+    )
+    langgraph_min_relevance_score: float = float(
+        os.getenv("LANGGRAPH_MIN_RELEVANCE_SCORE", "0.45")
+    )
+    langgraph_ingest_limit: int = int(os.getenv("LANGGRAPH_INGEST_LIMIT", "3"))
+    langgraph_use_llm_grader: bool = os.getenv(
+        "LANGGRAPH_USE_LLM_GRADER",
+        "true"
+    ).lower() == "true"
+
     # Citation-graph-aware retrieval boost
     # Weight added to chunk score when its paper is in the 1-hop citation
     # neighbourhood of the top retrieved papers. Set to 0 to disable.
