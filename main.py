@@ -1,7 +1,7 @@
 """Main entry point for the RAG pipeline."""
 import json
 import uuid
-from typing import Optional
+from typing import Callable, List, Optional
 from config.settings import settings
 from ingestion.pdf_loader import load_pdf_from_url, extract_pdf_metadata
 from ingestion.semantic_scholar import fetch_paper_metadata
@@ -57,7 +57,10 @@ def query_rag(
     query: str,
     top_k: int = 5,
     fetch_papers: bool = True,
-    use_enhanced: bool = True
+    use_enhanced: bool = True,
+    selected_paper_ids: Optional[List[str]] = None,
+    thread_id: Optional[str] = None,
+    progress_callback: Optional[Callable[[str, str], None]] = None,
 ) -> dict:
     """
     Query the RAG pipeline with enhanced features.
@@ -67,6 +70,9 @@ def query_rag(
         top_k: Number of context chunks to retrieve
         fetch_papers: Whether to fetch papers on-demand if needed
         use_enhanced: Whether to use enhanced pipeline (hybrid search, re-ranking)
+        selected_paper_ids: Optional paper IDs to restrict retrieval
+        thread_id: Persistent LangGraph conversation identifier
+        progress_callback: Receives LangGraph stage progress updates
         
     Returns:
         RAG response as dictionary
@@ -80,7 +86,10 @@ def query_rag(
                 top_k=top_k,
                 fetch_papers=fetch_papers,
                 use_hybrid_search=True,
-                use_reranking=True
+                use_reranking=True,
+                selected_paper_ids=selected_paper_ids,
+                thread_id=thread_id,
+                progress_callback=progress_callback,
             )
         else:
             from rag.pipeline import run_simple_rag_pipeline
@@ -91,6 +100,7 @@ def query_rag(
             "answer": response.answer,
             "citations": response.citations,
             "context_chunks": response.context_chunks,
+            "workflow": response.metadata,
         }
 
 

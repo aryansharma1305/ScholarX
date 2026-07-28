@@ -62,10 +62,19 @@ def _request_with_retries(
                 time.sleep(delay)
                 continue
 
+            # Authentication, validation, and missing-paper responses are permanent.
+            # Retrying them makes interactive searches appear to hang.
+            if 400 <= response.status_code < 500:
+                response.raise_for_status()
+
             response.raise_for_status()
             return response
         except requests.RequestException as e:
             last_error = e
+            status_code = e.response.status_code if e.response is not None else None
+            if status_code is not None and 400 <= status_code < 500:
+                if status_code != 429 or not SEMANTIC_SCHOLAR_API_KEY:
+                    raise
             if attempt < max_retries - 1:
                 delay = BASE_RETRY_DELAY_SECONDS * (2 ** attempt)
                 logger.warning(
@@ -379,7 +388,7 @@ def get_paper_citations(paper_id: str, limit: int = 100, offset: int = 0) -> Dic
         params = {
             "limit": min(limit, 1000),
             "offset": offset,
-            "fields": "title,year,authors,abstract"
+            "fields": "title,year,authors,abstract,externalIds"
         }
         
         logger.info(f"Fetching citations for: {paper_id}")
@@ -395,6 +404,7 @@ def get_paper_citations(paper_id: str, limit: int = 100, offset: int = 0) -> Dic
                 "year": citing_paper.get("year"),
                 "authors": [a.get("name", "") for a in citing_paper.get("authors", [])],
                 "abstract": citing_paper.get("abstract"),
+                "external_ids": citing_paper.get("externalIds") or {},
                 "is_influential": citation.get("isInfluential", False)
             })
         
@@ -426,7 +436,7 @@ def get_paper_references(paper_id: str, limit: int = 100, offset: int = 0) -> Di
         params = {
             "limit": min(limit, 1000),
             "offset": offset,
-            "fields": "title,year,authors,abstract"
+            "fields": "title,year,authors,abstract,externalIds"
         }
         
         logger.info(f"Fetching references for: {paper_id}")
@@ -442,6 +452,7 @@ def get_paper_references(paper_id: str, limit: int = 100, offset: int = 0) -> Di
                 "year": cited_paper.get("year"),
                 "authors": [a.get("name", "") for a in cited_paper.get("authors", [])],
                 "abstract": cited_paper.get("abstract"),
+                "external_ids": cited_paper.get("externalIds") or {},
                 "is_influential": ref.get("isInfluential", False)
             })
         
@@ -616,4 +627,3 @@ def search_snippets(query: str, limit: int = 10, paper_ids: Optional[List[str]] 
     except Exception as e:
         logger.error(f"Snippet search error: {e}")
         return []
-

@@ -1,6 +1,7 @@
 """RAG answer generation using OpenAI, Grok (xAI), Ollama, or simple template."""
+import re
 from typing import List, Dict, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from config.settings import settings
 from vectorstore.query import QueryResult
 from utils.logger import get_logger
@@ -16,8 +17,8 @@ def _get_openai_client():
     """Lazy load OpenAI client."""
     global _openai_client
     if _openai_client is None:
-        from config.openai_client import client
-        _openai_client = client
+        from config.openai_client import get_openai_client
+        _openai_client = get_openai_client()
     return _openai_client
 
 
@@ -40,6 +41,7 @@ class RAGResponse:
     citations: List[Dict[str, Any]]
     context_chunks: List[Dict[str, Any]]
     query: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 def format_context_for_prompt(results: List[QueryResult]) -> str:
@@ -110,28 +112,73 @@ def _generate_with_ollama(query: str, context_text: str, system_prompt: str) -> 
 
 
 def _generate_simple_answer(query: str, context_chunks: List[QueryResult]) -> str:
-    """Generate simple template-based answer without LLM."""
-    # Extract relevant sentences from top chunks
-    answer_parts = []
-    answer_parts.append(f"Based on the research papers, here's what I found about '{query}':\n\n")
-    
-    for idx, chunk in enumerate(context_chunks[:3], 1):  # Top 3 chunks
-        # Extract first few sentences
-        sentences = chunk.text.split('. ')[:2]  # First 2 sentences
-        text_snippet = '. '.join(sentences)
-        if text_snippet:
-            answer_parts.append(f"[Context {idx}] {text_snippet}...")
-            answer_parts.append(f"(Source: Paper {chunk.paper_id}, Chunk {chunk.chunk_index})\n")
-    
-    answer_parts.append("\nFor more details, please refer to the cited papers and their full context.")
-    
-    return "\n".join(answer_parts)
+    """Build a conservative extractive answer when no chat model is available."""
+    stop_words = {
+        "about", "from", "have", "into", "that", "their", "these", "this",
+        "what", "when", "where", "which", "with", "would",
+    }
+    query_terms = {
+        token
+        for token in re.findall(r"[a-z0-9]+", query.lower())
+        if len(token) > 2 and token not in stop_words
+    }
+    candidates = []
+    for context_index, chunk in enumerate(context_chunks, 1):
+        sentences = re.split(r"(?<=[.!?])\s+", chunk.text.replace("\n", " "))
+        for sentence_index, sentence in enumerate(sentences):
+            clean_sentence = " ".join(sentence.split()).strip()
+            if len(clean_sentence) < 30:
+                continue
+            sentence_terms = set(re.findall(r"[a-z0-9]+", clean_sentence.lower()))
+            matched_terms = len(query_terms.intersection(sentence_terms))
+            if query_terms and matched_terms == 0:
+                continue
+            coverage = matched_terms / len(query_terms) if query_terms else 0.0
+            score = coverage + (0.2 * float(chunk.score)) - (0.01 * sentence_index)
+            candidates.append((score, context_index, chunk, clean_sentence))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    selected = []
+    seen_sentences = set()
+    for _, context_index, chunk, sentence in candidates:
+        normalized = sentence.lower()
+        if normalized in seen_sentences:
+            continue
+        selected.append((context_index, chunk, sentence))
+        seen_sentences.add(normalized)
+        if len(selected) >= 3:
+            break
+
+    if not selected:
+        return (
+            "The retrieved papers do not contain a sufficiently direct passage to "
+            f"answer '{query}' without an LLM. Try a more specific query or fetch "
+            "additional papers."
+        )
+
+    answer_parts = [
+        f"Most relevant evidence found for '{query}':",
+        "",
+    ]
+    for context_index, chunk, sentence in selected:
+        answer_parts.append(f"[Context {context_index}] {sentence}")
+        answer_parts.append(
+            f"(Source: Paper {chunk.paper_id}, Chunk {chunk.chunk_index})"
+        )
+
+    answer_parts.append("")
+    answer_parts.append(
+        "This is an extractive fallback response; configure a working LLM "
+        "provider for a synthesized literature-review answer."
+    )
+    return "\n\n".join(answer_parts)
 
 
 def generate_answer(
     query: str,
     context_chunks: List[QueryResult],
-    system_prompt: str = None
+    system_prompt: str = None,
+    force_simple: bool = False,
 ) -> RAGResponse:
     """
     Generate RAG answer using configured LLM provider.
@@ -140,6 +187,7 @@ def generate_answer(
         query: User query
         context_chunks: Retrieved context chunks
         system_prompt: Custom system prompt (optional)
+        force_simple: Skip external model calls and use extractive generation
         
     Returns:
         RAGResponse with answer, citations, and context
@@ -161,11 +209,15 @@ def generate_answer(
     context_text = format_context_for_prompt(context_chunks)
     
     # Generate answer based on provider
-    logger.info(f"Generating answer using {settings.llm_provider}")
+    provider = "simple" if force_simple else settings.llm_provider
+    logger.info(f"Generating answer using {provider}")
     
     answer = None
     
-    if settings.llm_provider == "grok":
+    if force_simple:
+        answer = _generate_simple_answer(query, context_chunks)
+
+    elif settings.llm_provider == "grok":
         try:
             answer = _generate_with_grok(query, context_text, system_prompt)
         except Exception as e:

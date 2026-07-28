@@ -7,6 +7,7 @@ import os
 import hashlib
 import re
 import tempfile
+import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -52,9 +53,6 @@ from api.visualization import (
 )
 import networkx as nx
 
-# Set to free mode
-settings.embedding_provider = "sentence-transformers"
-settings.llm_provider = "simple"
 CURRENT_YEAR = datetime.now().year
 
 # Page config
@@ -80,6 +78,8 @@ if 'search_results_query' not in st.session_state:
     st.session_state.search_results_query = ""
 if 'review_search_meta' not in st.session_state:
     st.session_state.review_search_meta = {}
+if 'graph_thread_id' not in st.session_state:
+    st.session_state.graph_thread_id = str(uuid.uuid4())
 
 
 # Custom CSS
@@ -535,6 +535,7 @@ with st.sidebar:
     st.subheader("💾 Chat History")
     if st.button("🗑️ Clear History"):
         st.session_state.chat_history = []
+        st.session_state.graph_thread_id = str(uuid.uuid4())
         st.rerun()
     
     if st.session_state.chat_history:
@@ -801,6 +802,7 @@ with tab2:
                         # ✅ KEY FIX: persist results in session_state so they survive reruns
                         st.session_state["search_results"] = unique_papers
                         st.session_state["search_results_query"] = query
+                        st.session_state["search_performed"] = True
 
                     except Exception as e:
                         st.error(f"Search error: {e}")
@@ -838,7 +840,10 @@ with tab2:
             for i, paper in enumerate(display_papers, 1):
                 display_paper_card_with_ranking(paper, query=saved_query, rank=i)
 
-    
+        elif st.session_state.get("search_performed") and not st.session_state.get("search_results"):
+            st.warning("⚠️ No papers found for this query.")
+            st.info("Try adjusting your filters (e.g., uncheck 'PDF available only' or use fewer keywords).")
+
     elif search_type == "Literature Review":
         st.markdown("### Literature Review Search")
         st.caption("Expands your topic into review/survey-style queries, searches ArXiv, Semantic Scholar, Crossref, OpenAlex, and CORE, then deduplicates and ranks papers for review usefulness.")
@@ -1305,59 +1310,98 @@ with tab4:
         
         # Generate response
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                try:
-                    if paper_selection_mode == "Selected Papers" and selected_paper_ids:
-                        # Multi-document RAG
-                        result = api.rag_multi_document(selected_paper_ids, query)
-                    else:
-                        # Standard RAG (fetches papers if needed)
-                        result = query_rag(
-                            query=query,
-                            top_k=top_k,
-                            fetch_papers=(paper_selection_mode == "Fetch New Papers"),
-                            use_enhanced=use_enhanced
-                        )
+            graph_status = st.status("Starting research workflow...", expanded=True)
+
+            def report_graph_progress(stage: str, message: str) -> None:
+                graph_status.write(message)
+
+            try:
+                result = query_rag(
+                    query=query,
+                    top_k=top_k,
+                    fetch_papers=(paper_selection_mode == "Fetch New Papers"),
+                    use_enhanced=use_enhanced,
+                    selected_paper_ids=(
+                        selected_paper_ids
+                        if paper_selection_mode == "Selected Papers"
+                        else None
+                    ),
+                    thread_id=st.session_state.graph_thread_id,
+                    progress_callback=report_graph_progress,
+                )
+                graph_status.update(
+                    label="Research workflow complete",
+                    state="complete",
+                    expanded=False,
+                )
                     
-                    # Display answer
-                    st.write(result["answer"])
+                # Display answer
+                st.write(result["answer"])
                     
-                    # Display citations
-                    if result.get("citations"):
-                        with st.expander("📚 Citations & Sources"):
-                            unique_papers = {}
-                            for citation in result["citations"]:
-                                pid = citation["paper_id"]
-                                if pid not in unique_papers:
-                                    unique_papers[pid] = {
-                                        "paper_id": pid,
-                                        "chunks": [],
-                                        "scores": []
-                                    }
-                                unique_papers[pid]["chunks"].append(citation.get("chunk_index"))
-                                unique_papers[pid]["scores"].append(citation.get("score", 0))
+                # Display citations
+                if result.get("citations"):
+                    with st.expander("📚 Citations & Sources"):
+                        unique_papers = {}
+                        for citation in result["citations"]:
+                            pid = citation["paper_id"]
+                            if pid not in unique_papers:
+                                unique_papers[pid] = {
+                                    "paper_id": pid,
+                                    "chunks": [],
+                                    "scores": []
+                                }
+                            unique_papers[pid]["chunks"].append(citation.get("chunk_index"))
+                            unique_papers[pid]["scores"].append(citation.get("score", 0))
                             
-                            for pid, info in unique_papers.items():
-                                avg_score = sum(info["scores"]) / len(info["scores"]) if info["scores"] else 0
-                                st.markdown(f"""
-                                <div class="citation">
-                                    <strong>Paper ID:</strong> {pid}<br>
-                                    <strong>Chunks cited:</strong> {len(info['chunks'])}<br>
-                                    <strong>Relevance:</strong> {avg_score:.2%}
-                                </div>
-                                """, unsafe_allow_html=True)
+                        for pid, info in unique_papers.items():
+                            avg_score = sum(info["scores"]) / len(info["scores"]) if info["scores"] else 0
+                            st.markdown(f"""
+                            <div class="citation">
+                                <strong>Paper ID:</strong> {pid}<br>
+                                <strong>Chunks cited:</strong> {len(info['chunks'])}<br>
+                                <strong>Relevance:</strong> {avg_score:.2%}
+                            </div>
+                            """, unsafe_allow_html=True)
+
+                workflow = result.get("workflow") or {}
+                if workflow:
+                    with st.expander("Workflow diagnostics", expanded=False):
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("Retrieval attempts", workflow.get("retrieval_attempts", 0))
+                        col2.metric("External searches", workflow.get("external_searches", 0))
+                        col3.metric("Answer retries", workflow.get("answer_retries", 0))
+                        evidence_grade = workflow.get("evidence_grade") or {}
+                        answer_grade = workflow.get("answer_grade") or {}
+                        if evidence_grade:
+                            st.write(
+                                f"Evidence: {evidence_grade.get('reason', 'N/A')} "
+                                f"({evidence_grade.get('method', 'unknown')})"
+                            )
+                        if answer_grade:
+                            st.write(
+                                f"Validation: {answer_grade.get('reason', 'N/A')} "
+                                f"({answer_grade.get('method', 'unknown')})"
+                            )
+                        for warning in workflow.get("warnings", []):
+                            st.warning(warning)
                     
-                    # Save to history
-                    st.session_state.chat_history.append({
-                        "query": query,
-                        "answer": result["answer"],
-                        "citations": result.get("citations", []),
-                        "timestamp": datetime.now().isoformat()
-                    })
+                # Save to history
+                st.session_state.chat_history.append({
+                    "query": query,
+                    "answer": result["answer"],
+                    "citations": result.get("citations", []),
+                    "workflow": workflow,
+                    "timestamp": datetime.now().isoformat()
+                })
                     
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
-                    st.exception(e)
+            except Exception as e:
+                graph_status.update(
+                    label="Research workflow failed",
+                    state="error",
+                    expanded=True,
+                )
+                st.error(f"Error: {str(e)}")
+                st.exception(e)
 
 # Tab 5: Advanced Search
 with tab5:

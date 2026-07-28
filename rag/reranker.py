@@ -10,7 +10,7 @@ logger = get_logger(__name__)
 def rerank_results(
     results: List[QueryResult],
     paper_metadata_map: dict = None,
-    diversity_weight: float = 0.1
+    diversity_weight: float = 0.05
 ) -> List[QueryResult]:
     """
     Re-rank results considering multiple factors.
@@ -41,16 +41,15 @@ def rerank_results(
         quality_score = calculate_quality_score(paper_meta)
         
         # Diversity bonus (prefer papers we haven't seen much)
-        diversity_bonus = 0.0
-        if result.paper_id not in seen_papers:
-            diversity_bonus = 0.1
+        diversity_bonus = 1.0 if result.paper_id not in seen_papers else 0.0
         seen_papers.add(result.paper_id)
         
         # Combine scores
-        # 60% semantic/keyword score, 30% quality, 10% diversity
+        # Relevance must dominate: metadata quality is a tie-breaker, not a
+        # substitute for actually answering the query.
         final_score = (
-            0.6 * base_score +
-            0.3 * quality_score +
+            0.85 * base_score +
+            0.10 * quality_score +
             diversity_weight * diversity_bonus
         )
         
@@ -101,6 +100,5 @@ def ensure_diversity(results: List[QueryResult], max_per_paper: int = 2) -> List
     
     logger.info(f"Diversified results: {len(diversified)} from {len(results)} original")
     return diversified
-
 
 

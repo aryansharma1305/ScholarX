@@ -92,6 +92,9 @@ desktop.ini
 # Streamlit
 .streamlit/
 
+# Local LangGraph checkpoints and runtime state
+.runtime/
+
 # PDFs (if storing locally)
 *.pdf
 pdfs/
@@ -111,5 +114,4 @@ credentials.json
 *.zip
 *.tar.gz
 *.rar
-
 

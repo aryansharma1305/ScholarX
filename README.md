@@ -1,6 +1,40 @@
-# ScholarX - Research Paper RAG Pipeline
+# ScholarX - LangGraph Research Paper RAG
 
-A production-ready Python RAG pipeline for semantic search and question answering over research papers. Built with ChromaDB, Sentence Transformers, and advanced retrieval techniques.
+A research-paper discovery and grounded question-answering application built with
+LangGraph, LangChain, ChromaDB, Sentence Transformers, Streamlit, and FastAPI.
+ScholarX searches multiple scholarly sources, ingests open-access papers, retrieves
+relevant evidence, validates answers, and exposes citations and workflow diagnostics.
+
+## 🧭 LangGraph Workflow
+
+Enhanced RAG requests run through a bounded, deterministic graph. The graph does not
+use an unrestricted tool-selecting agent.
+
+```mermaid
+flowchart LR
+    A[Normalize query] --> B[Retrieve local evidence]
+    B --> C[Grade evidence]
+    C -->|Sufficient| F[Rerank and diversify]
+    C -->|Insufficient| D[Search scholarly APIs]
+    D --> E[Deduplicate, rank, and ingest]
+    E --> B
+    F --> G[Generate grounded answer]
+    G --> H[Validate answer]
+    H -->|Supported| J[Finalize]
+    H -->|Unsupported and retry available| I[Rewrite query once]
+    I --> B
+    H -->|Retry exhausted| J
+```
+
+Default safety bounds:
+
+- At most one external-search cycle.
+- At most one answer-validation retry.
+- SQLite checkpoints keyed by conversation thread.
+- Deterministic evidence grading and extractive generation remain available when
+  an LLM provider is unavailable.
+- The previous non-LangGraph pipeline remains available with
+  `USE_LANGGRAPH=false`.
 
 ## 🚀 Quick Start
 
@@ -8,6 +42,9 @@ A production-ready Python RAG pipeline for semantic search and question answerin
 ```bash
 # Install dependencies
 pip install -r requirements.txt
+
+# Create local configuration
+cp .env.example .env
 
 # Run Streamlit app
 streamlit run streamlit_app.py
@@ -98,6 +135,9 @@ python-rag/
 │   └── query.py
 ├── rag/                       # RAG pipeline
 │   ├── pipeline.py
+│   ├── langgraph_pipeline.py # Stateful bounded research workflow
+│   ├── langchain_models.py   # Model factory, graders, validation
+│   ├── langchain_adapters.py # Existing retrieval as LangChain retriever
 │   ├── retriever.py
 │   ├── generator.py
 │   ├── hybrid_search.py
@@ -125,9 +165,16 @@ python-rag/
 - ✅ **Semantic Search**: Vector-based similarity search
 - ✅ **Metadata Storage**: Title, authors, abstract, year, DOI, etc.
 - ✅ **RAG QA**: Question answering with citations
+- ✅ **LangGraph Orchestration**: Explicit retrieval, grading, generation, and validation nodes
+- ✅ **Conversation Persistence**: SQLite graph checkpoints per Streamlit chat thread
+- ✅ **Progress Streaming**: Live node-level workflow status in Streamlit
+- ✅ **Controlled Recovery**: Conditional external search and one bounded answer retry
+- ✅ **Evidence Validation**: Structured LLM grading with deterministic fallback
 
 ### Advanced Features
 - ✅ **Hybrid Search**: Combines semantic + keyword search
+- ✅ **Multi-Source Discovery**: ArXiv, Semantic Scholar, Crossref, OpenAlex, and CORE
+- ✅ **Literature Review Search**: Query expansion, deduplication, quality labels, and review-ready export
 - ✅ **Paper API**: Get paper details, summaries, chunks
 - ✅ **Citation Graph**: Find related and citing papers
 - ✅ **Auto Summaries**: Generate short, medium, and bullet-point summaries
@@ -229,18 +276,94 @@ api.export_markdown(filename="library.md")
 
 Edit `.env`:
 ```env
-EMBEDDING_PROVIDER=sentence-transformers  # Free, local
-LLM_PROVIDER=simple                        # Template-based
+EMBEDDING_PROVIDER=sentence-transformers
+
+# grok | openai | ollama | simple
+LLM_PROVIDER=simple
+GROK_API_KEY=
+OPENAI_API_KEY=
+OLLAMA_BASE_URL=http://localhost:11434
+
 CHUNK_SIZE=1000
+CHUNK_OVERLAP=200
+DEFAULT_TOP_K=5
 MAX_PAPERS_PER_QUERY=5
-SEMANTIC_SCHOLAR_API_KEY=your_key_here     # Optional
+
+USE_LANGGRAPH=true
+LANGGRAPH_CHECKPOINT_PATH=./.runtime/langgraph_checkpoints.sqlite3
+LANGGRAPH_MAX_EXTERNAL_SEARCHES=1
+LANGGRAPH_MAX_ANSWER_RETRIES=1
+LANGGRAPH_MIN_CONTEXT_CHUNKS=3
+LANGGRAPH_MIN_RELEVANCE_SCORE=0.45
+LANGGRAPH_INGEST_LIMIT=3
+LANGGRAPH_USE_LLM_GRADER=true
+
+SEMANTIC_SCHOLAR_API_KEY=
+CORE_API_KEY=
+CROSSREF_MAILTO=
 ```
+
+Use `simple` for a key-free extractive fallback. For synthesized answers and LLM
+evidence grading, configure a funded Grok/OpenAI account or a reachable Ollama
+instance. API keys belong in `.env` or deployment secrets, never in source control.
 
 ## 🔧 Requirements
 
 - Python 3.10+
 - See `requirements.txt` for dependencies
 - No API keys needed for free mode!
+
+## 🧪 Validation
+
+Run the focused LangGraph and citation regression tests:
+
+```bash
+python3 -m pytest -q \
+  test_langgraph_pipeline.py \
+  test_citation_graph_identifiers.py
+```
+
+Run the complete project validation:
+
+```bash
+python3 test_all_modules.py
+```
+
+Run the optional live multi-source search smoke check:
+
+```bash
+python3 streamlit_search_smoke.py
+```
+
+The current validation baseline is 81 passed, 0 failed, and 2 intentionally
+skipped slow embedding tests. The focused LangGraph/citation suite contains 9
+passing tests.
+
+## 🚢 Deployment
+
+### Streamlit Community Cloud
+
+1. Push this repository to GitHub.
+2. Create a Streamlit app with `streamlit_app.py` as the entry point.
+3. Add provider keys and configuration through Streamlit Secrets.
+4. Keep `CHROMA_PERSIST_DIR` and `LANGGRAPH_CHECKPOINT_PATH` writable.
+
+SQLite checkpoints are suitable for one application instance. Streamlit
+Community Cloud filesystems can be ephemeral, so long-term conversation history
+requires persistent storage. Multi-instance deployments should replace SQLite
+with a shared production checkpointer such as PostgreSQL.
+
+### FastAPI
+
+```bash
+uvicorn api.server:app --host 0.0.0.0 --port 8000
+```
+
+Health check:
+
+```bash
+curl http://localhost:8000/health
+```
 
 ## 📡 APIs Used
 
@@ -261,6 +384,10 @@ SEMANTIC_SCHOLAR_API_KEY=your_key_here     # Optional
 ### OpenAlex API (Free, No Key)
 - **Base URL**: `https://api.openalex.org`
 - **Features**: Comprehensive paper metadata
+
+### CORE API (Key Required)
+- **Base URL**: `https://api.core.ac.uk/v3`
+- **Features**: Open-access paper discovery, metadata, and downloadable full-text links
 
 ## ⚠️ When ScholarX Fails
 

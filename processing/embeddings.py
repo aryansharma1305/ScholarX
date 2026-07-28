@@ -1,4 +1,5 @@
 """Embedding generation using OpenAI or Sentence Transformers."""
+import os
 from typing import List
 from config.settings import settings
 from utils.logger import get_logger
@@ -7,21 +8,52 @@ logger = get_logger(__name__)
 
 # Lazy loading of embedding models
 _sentence_transformer_model = None
+_sentence_transformer_unavailable = False
 _openai_client = None
 
 
 def _get_sentence_transformer():
     """Lazy load sentence transformer model."""
-    global _sentence_transformer_model
+    global _sentence_transformer_model, _sentence_transformer_unavailable
+    if _sentence_transformer_unavailable:
+        return None
     if _sentence_transformer_model is None:
         try:
+            os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
             from sentence_transformers import SentenceTransformer
             logger.info(f"Loading sentence transformer model: {settings.sentence_transformer_model}")
             _sentence_transformer_model = SentenceTransformer(settings.sentence_transformer_model)
             logger.info("Sentence transformer model loaded successfully")
-        except ImportError:
-            raise ImportError("sentence-transformers not installed. Run: pip install sentence-transformers")
+        except ImportError as exc:
+            raise ImportError(
+                "sentence-transformers not installed. Run: pip install sentence-transformers"
+            ) from exc
+        except Exception as exc:
+            _sentence_transformer_unavailable = True
+            logger.warning(
+                "Sentence Transformer model is unavailable (%s). Falling back "
+                "to deterministic 384-dimensional local embeddings.",
+                exc,
+            )
+            return None
     return _sentence_transformer_model
+
+
+def _generate_local_fallback_embeddings(texts: List[str]) -> List[List[float]]:
+    """
+    Generate deterministic local embeddings when the configured model is absent.
+
+    This keeps ingestion and tests operational offline. Retrieval quality is
+    lower than all-MiniLM-L6-v2, so production should cache the configured model.
+    """
+    from sklearn.feature_extraction.text import HashingVectorizer
+
+    vectorizer = HashingVectorizer(
+        n_features=384,
+        alternate_sign=False,
+        norm="l2",
+    )
+    return vectorizer.transform(texts).toarray().tolist()
 
 
 def _get_openai_client():
@@ -48,6 +80,8 @@ def generate_embedding(text: str) -> List[float]:
     if settings.embedding_provider == "sentence-transformers":
         # Use free sentence transformers
         model = _get_sentence_transformer()
+        if model is None:
+            return _generate_local_fallback_embeddings([text])[0]
         embedding = model.encode(text, convert_to_numpy=False)
         logger.debug(f"Generated embedding of dimension {len(embedding)} using sentence-transformers")
         return embedding.tolist() if hasattr(embedding, 'tolist') else list(embedding)
@@ -85,6 +119,8 @@ def generate_embeddings_batch(texts: List[str], batch_size: int = 100) -> List[L
     if settings.embedding_provider == "sentence-transformers":
         # Sentence transformers handles batching efficiently
         model = _get_sentence_transformer()
+        if model is None:
+            return _generate_local_fallback_embeddings(texts)
         logger.info(f"Generating embeddings for {len(texts)} texts using sentence-transformers")
         embeddings = model.encode(texts, convert_to_numpy=True, batch_size=batch_size)
         # Convert numpy array to list of lists

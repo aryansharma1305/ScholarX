@@ -1,6 +1,5 @@
 """Automatic paper summarization."""
 from typing import Dict, List
-from config.openai_client import client
 from config.settings import settings
 from api.paper_api import get_paper_by_id
 from utils.logger import get_logger
@@ -40,6 +39,9 @@ def generate_paper_summary(paper_id: str, use_llm: bool = False) -> Dict:
     if use_llm and settings.llm_provider == "openai" and settings.openai_api_key:
         # Use LLM for better summaries
         try:
+            from config.openai_client import get_openai_client
+
+            client = get_openai_client()
             prompt = f"""Paper Title: {title}
 
 Abstract: {abstract}
@@ -97,5 +99,4 @@ Format as JSON with keys: short, medium, bullets (array)."""
         "medium": medium,
         "bullets": bullets[:7]
     }
-
 
